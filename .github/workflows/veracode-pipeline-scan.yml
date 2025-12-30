@@ -1,0 +1,90 @@
+name: Veracode Pipeline Scan (Ultimate SARIF for GitHub Code Scanning)
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - master
+      - main
+
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
+jobs:
+  pipeline_scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Placeholder file for findings without file context (required for GitHub Code Scanning).
+      - name: Ensure placeholder file exists for global findings
+        run: |
+          mkdir -p .veracode
+          cat > .veracode/PIPELINE_SCAN_GLOBAL_FINDINGS.md << 'EOF'
+          # Veracode Pipeline Scan – Global Findings Placeholder
+
+          Some Pipeline Scan findings are not associated with a specific file/line.
+          These findings are anchored to this file so GitHub Code Scanning can display them.
+          EOF
+
+      - name: Create source zip (exclude node_modules)
+        run: |
+          zip -r pipeline-src.zip . \
+            -x "**/node_modules/**" \
+            -x "**/.git/**"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Download Veracode Pipeline Scan tool
+        run: |
+          curl -sSLO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+          unzip -o pipeline-scan-LATEST.zip
+
+      - name: Run Veracode Pipeline Scan
+        continue-on-error: true
+        env:
+          VERACODE_API_ID: ${{ secrets.VERACODE_API_ID }}
+          VERACODE_API_KEY: ${{ secrets.VERACODE_API_KEY }}
+        run: |
+          java -jar pipeline-scan.jar \
+            --veracode_api_id "$VERACODE_API_ID" \
+            --veracode_api_key "$VERACODE_API_KEY" \
+            --file "pipeline-src.zip" \
+            --json_output_file "results.json" \
+            --filtered_json_output_file "filtered_results.json"
+
+      - name: Convert Pipeline Scan results to SARIF (capture 100% of findings)
+        run: |
+          python scripts/pipeline_results_to_sarif.py \
+            --input results.json \
+            --output veracode-pipeline.sarif \
+            --placeholder-uri .veracode/PIPELINE_SCAN_GLOBAL_FINDINGS.md \
+            --output-stats veracode-pipeline-sarif-stats.json
+
+      - name: Upload SARIF to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: veracode-pipeline.sarif
+          category: veracode-pipeline
+          wait-for-processing: true
+
+      - name: Upload Pipeline Scan outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: veracode-pipeline-scan-results
+          path: |
+            results.json
+            filtered_results.json
+            veracode-pipeline.sarif
+            veracode-pipeline-sarif-stats.json
+            .veracode/PIPELINE_SCAN_GLOBAL_FINDINGS.md
