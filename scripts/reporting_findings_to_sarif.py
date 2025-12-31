@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
 """
-Veracode Reporting API (Findings) JSON -> SARIF 2.1.0 for GitHub Code Scanning.
+Veracode Reporting API Findings JSON -> SARIF 2.1.0 (GitHub Code Scanning).
 
-This converter is tailored to the Reporting API JSON shape you have:
-- scan_type: "Static Analysis" (only these reliably map to repo files)
-- local_path / static_local_path: repo-relative file paths
-- source_file_line: line number (string)
-- severity: "0".."5"
-
-Key requirements:
-- GitHub Code Scanning requires at least one location per SARIF result. 
-- We only attach real source locations for Static Analysis findings. Others go to a placeholder.
+Fixes "lines not clickable" by mapping Veracode paths to REAL repo paths:
+- strips build output prefixes (e.g. target/<module>/...)
+- tries common Java source roots (src/main/webapp, etc.)
+- verifies file exists in GITHUB_WORKSPACE before emitting SARIF URI
 """
 
 import argparse
 import hashlib
 import json
-from typing import Any, Dict, List, Optional
+import os
+from typing import Any, Dict, List, Optional, Tuple
 
-# severity -> (sarif level, label, github security severity score)
 SEV_MAP = {
     "5": ("error",   "VERY_HIGH", "9.5"),
     "4": ("error",   "HIGH",      "8.0"),
@@ -28,22 +23,24 @@ SEV_MAP = {
     "0": ("note",    "INFO",      "0.1"),
 }
 
+DEFAULT_SOURCE_ROOTS = [
+    "",                 # repo root
+    "src/main/webapp/",
+    "src/main/resources/",
+    "src/",
+]
 
 def sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
-
 def as_str(x: Any) -> str:
     return "" if x is None else str(x)
 
-
-def normalize_repo_path(p: str) -> str:
+def normalize_path(p: str) -> str:
     p = p.replace("\\", "/").strip()
     if p.startswith("./"):
         p = p[2:]
-    # no leading slash; GitHub expects repo-relative URIs
     return p.lstrip("/")
-
 
 def safe_int(x: Any, default: int = 1) -> int:
     try:
@@ -52,39 +49,77 @@ def safe_int(x: Any, default: int = 1) -> int:
     except Exception:
         return default
 
-
 def stable_placeholder_line(rule_id: str, msg: str) -> int:
-    # stable line so placeholder findings don't all collide at line 1
     h = sha256_text(f"{rule_id}|{msg}")
     return (int(h[:8], 16) % 20000) + 1
 
+def pick_first(item: Dict[str, Any], keys: List[str]) -> Optional[str]:
+    for k in keys:
+        v = item.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+def strip_build_prefix(p: str) -> str:
+    """
+    Examples:
+      target/verademo/WEB-INF/views/profile.jsp -> WEB-INF/views/profile.jsp
+      target/classes/com/x/Foo.class -> com/x/Foo.class
+    """
+    p = normalize_path(p)
+    if p.startswith("target/"):
+        rest = p[len("target/"):]
+        # drop first segment after target/ (module name like verademo/, classes/, etc.)
+        if "/" in rest:
+            rest = rest.split("/", 1)[1]
+        return rest
+    return p
+
+def resolve_repo_uri(repo_root: str, raw_path: str, source_roots: List[str]) -> Optional[str]:
+    """
+    Returns a repo-relative path that actually exists in the checkout.
+    """
+    raw_path = strip_build_prefix(raw_path)
+
+    for root in source_roots:
+        candidate = normalize_path(root + raw_path)
+        full = os.path.join(repo_root, candidate)
+        if os.path.isfile(full):
+            return candidate
+
+    # also try the raw path directly (already normalized)
+    raw_norm = normalize_path(raw_path)
+    if os.path.isfile(os.path.join(repo_root, raw_norm)):
+        return raw_norm
+
+    return None
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True, help="out/findings_single_app_*.json (list)")
-    ap.add_argument("--output", required=True, help="Output SARIF file")
-    ap.add_argument("--placeholder-uri", required=True, help="Repo-relative placeholder file")
-    ap.add_argument("--output-stats", required=True, help="Stats JSON output")
+    ap.add_argument("--input", required=True)
+    ap.add_argument("--output", required=True)
+    ap.add_argument("--placeholder-uri", required=True)
+    ap.add_argument("--output-stats", required=True)
     ap.add_argument("--tool-name", default="Veracode Reporting API")
     ap.add_argument("--tool-version", default="")
     args = ap.parse_args()
+
+    repo_root = os.getenv("GITHUB_WORKSPACE", os.getcwd())
+    placeholder_uri = normalize_path(args.placeholder_uri)
 
     with open(args.input, "r", encoding="utf-8") as f:
         findings = json.load(f)
 
     if not isinstance(findings, list):
-        raise SystemExit("Expected input JSON to be a list (use out/findings_single_app_*.json).")
-
-    placeholder_uri = normalize_repo_path(args.placeholder_uri)
+        raise SystemExit("Expected a JSON list (use out/findings_single_app_*.json).")
 
     rules: Dict[str, Dict[str, Any]] = {}
     results: List[Dict[str, Any]] = []
 
     total = 0
-    static_with_location = 0
-    static_missing_location = 0
-    non_static = 0
+    resolved_paths = 0
     placeholder_used = 0
+    target_stripped = 0
 
     for it in findings:
         if not isinstance(it, dict):
@@ -92,12 +127,9 @@ def main() -> None:
         total += 1
 
         scan_type = as_str(it.get("scan_type")).strip()
-
-        # severity (string "0".."5")
         sev_raw = as_str(it.get("severity")).strip()
         sarif_level, sev_label, gh_sec_score = SEV_MAP.get(sev_raw, ("warning", "UNKNOWN", "0.0"))
 
-        # CWE/category/rule identity
         cwe_id = as_str(it.get("cwe_id")).strip()
         category_name = as_str(it.get("category_name")).strip()
         flaw_name = as_str(it.get("flaw_name")).strip()
@@ -111,41 +143,33 @@ def main() -> None:
             rule_id = "VERACODE-ISSUE"
 
         rule_name = category_name or flaw_name or rule_id
-
-        # message
         msg_core = flaw_name or as_str(it.get("description")).strip() or rule_name
-        msg = f"[{sev_label}] {msg_core}"
-        if finding_id:
-            msg += f" (finding_id={finding_id})"
+        msg = f"[{sev_label}] {msg_core}" + (f" (finding_id={finding_id})" if finding_id else "")
 
-        # Only Static Analysis findings should be mapped to source files
+        # Prefer local_path/static_local_path for static analysis
+        raw_path = pick_first(it, ["local_path", "static_local_path"])
+        raw_line = it.get("source_file_line")
+        start_line = safe_int(raw_line, default=1)
+
         uri: str
-        start_line: int
-
-        if scan_type == "Static Analysis":
-            # Prefer repo-relative local_path first, then static_local_path.
-            file_path = as_str(it.get("local_path")).strip() or as_str(it.get("static_local_path")).strip()
-            line_raw = it.get("source_file_line")
-            line = safe_int(line_raw, default=1)
-
-            if file_path:
-                uri = normalize_repo_path(file_path)
-                start_line = line
-                static_with_location += 1
+        if scan_type == "Static Analysis" and raw_path:
+            stripped = strip_build_prefix(raw_path)
+            if stripped != normalize_path(raw_path):
+                target_stripped += 1
+            resolved = resolve_repo_uri(repo_root, raw_path, DEFAULT_SOURCE_ROOTS)
+            if resolved:
+                uri = resolved
+                resolved_paths += 1
             else:
-                # Static analysis but no file path: placeholder
                 uri = placeholder_uri
                 start_line = stable_placeholder_line(rule_id, msg)
-                static_missing_location += 1
                 placeholder_used += 1
         else:
-            # Non-static findings (e.g., SCA): do NOT pretend we have a code location
-            non_static += 1
+            # SCA or no path: placeholder
             uri = placeholder_uri
             start_line = stable_placeholder_line(rule_id, msg)
             placeholder_used += 1
 
-        # Define rule once with security metadata so GitHub ranks properly
         if rule_id not in rules:
             rules[rule_id] = {
                 "id": rule_id,
@@ -158,11 +182,9 @@ def main() -> None:
                     "security-severity": gh_sec_score,
                     "veracode-severity": sev_label,
                     "cwe": cwe_id,
-                    "scan_type": scan_type,
                 },
             }
 
-        # GitHub requires locations[] for each result. 
         results.append({
             "ruleId": rule_id,
             "level": sarif_level,
@@ -178,6 +200,7 @@ def main() -> None:
                 "scan_type": scan_type,
                 "veracode_severity": sev_label,
                 "isPlaceholderLocation": (uri == placeholder_uri),
+                "raw_path": raw_path or "",
             },
         })
 
@@ -185,13 +208,11 @@ def main() -> None:
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
         "runs": [{
-            "tool": {
-                "driver": {
-                    "name": args.tool_name,
-                    **({"version": args.tool_version} if args.tool_version else {}),
-                    "rules": list(rules.values()),
-                }
-            },
+            "tool": {"driver": {
+                "name": args.tool_name,
+                **({"version": args.tool_version} if args.tool_version else {}),
+                "rules": list(rules.values()),
+            }},
             "results": results,
         }],
     }
@@ -203,20 +224,17 @@ def main() -> None:
         "input_findings": total,
         "sarif_results": len(results),
         "sarif_rules": len(rules),
-        "static_with_location": static_with_location,
-        "static_missing_location": static_missing_location,
-        "non_static_placeholder": non_static,
-        "placeholder_used_total": placeholder_used,
-        "placeholder_uri": placeholder_uri,
-        "path_fields_used_for_static": ["local_path", "static_local_path"],
-        "line_field_used_for_static": "source_file_line",
+        "resolved_repo_paths": resolved_paths,
+        "placeholder_used": placeholder_used,
+        "target_prefix_stripped": target_stripped,
+        "source_roots_tried": DEFAULT_SOURCE_ROOTS,
+        "repo_root": repo_root,
     }
     with open(args.output_stats, "w", encoding="utf-8") as f:
         json.dump(stats, f, indent=2, ensure_ascii=False)
 
-    print(f"Wrote SARIF: {args.output} (results={len(results)}, rules={len(rules)})")
-    print(f"Wrote stats: {args.output_stats} -> {stats}")
-
+    print(f"Wrote SARIF: {args.output}")
+    print(f"Stats: {stats}")
 
 if __name__ == "__main__":
     main()
