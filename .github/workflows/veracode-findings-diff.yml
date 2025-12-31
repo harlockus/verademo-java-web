@@ -1,0 +1,155 @@
+name: Veracode Findings Diff (A/B/C/D) - GitHub Only
+
+on:
+  workflow_dispatch:
+    inputs:
+      application_name:
+        description: "Veracode application profile name (exact match)"
+        required: true
+        default: "Juice-Shop-GitHub-Demo"
+      sandbox_name:
+        description: "Optional: sandbox name. Blank = POLICY diffs. Set = SANDBOX diffs."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  findings_diff:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq + unzip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq unzip
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download latest and previous reporting artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          REPORTING_WORKFLOW_FILE: veracode-reporting-pull-single-app.yml
+        run: |
+          set -euo pipefail
+          mkdir -p cur_artifact prev_artifact out/diff
+          BASELINE_ONLY=0
+
+          RUNS_JSON="$(curl -sS \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${OWNER}/${REPO}/actions/workflows/${REPORTING_WORKFLOW_FILE}/runs?status=success&per_page=20")"
+
+          RUN1="$(echo "$RUNS_JSON" | jq -r '.workflow_runs[0].id // empty')"
+          RUN2="$(echo "$RUNS_JSON" | jq -r '.workflow_runs[1].id // empty')"
+
+          if [ -z "${RUN1}" ]; then
+            echo "No successful reporting runs found."
+            exit 1
+          fi
+
+          if [ -z "${RUN2}" ]; then
+            BASELINE_ONLY=1
+          fi
+
+          get_artifact_id () {
+            local run_id="$1"
+            local arts_json
+            arts_json="$(curl -sS \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${OWNER}/${REPO}/actions/runs/${run_id}/artifacts")"
+
+            echo "$arts_json" | jq -r '
+              .artifacts
+              | map(select(.name=="veracode-reporting-findings-single-app"))
+              | .[0].id // empty
+            '
+          }
+
+          ART1="$(get_artifact_id "${RUN1}")"
+          if [ -z "${ART1}" ]; then
+            echo "Artifact not found on run ${RUN1}."
+            exit 1
+          fi
+
+          curl -L -sS -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${OWNER}/${REPO}/actions/artifacts/${ART1}/zip" \
+            -o cur_artifact/cur.zip
+          unzip -o cur_artifact/cur.zip -d cur_artifact/unzipped >/dev/null
+
+          if [ "${BASELINE_ONLY}" = "0" ]; then
+            ART2="$(get_artifact_id "${RUN2}")"
+            if [ -z "${ART2}" ]; then
+              BASELINE_ONLY=1
+            else
+              curl -L -sS -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${OWNER}/${REPO}/actions/artifacts/${ART2}/zip" \
+                -o prev_artifact/prev.zip
+              unzip -o prev_artifact/prev.zip -d prev_artifact/unzipped >/dev/null
+            fi
+          fi
+
+          echo "BASELINE_ONLY=${BASELINE_ONLY}" >> $GITHUB_ENV
+
+      - name: Find JSON files in artifacts and run diff (explicit policy vs sandbox)
+        env:
+          APP_NAME: ${{ inputs.application_name }}
+          SANDBOX_NAME: ${{ inputs.sandbox_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p out/diff
+          BASELINE_ONLY="${BASELINE_ONLY:-0}"
+
+          if [ -n "${SANDBOX_NAME}" ]; then
+            TARGET="findings_single_app_${APP_NAME}__sandbox__${SANDBOX_NAME}.json"
+            MODE="SANDBOX"
+          else
+            TARGET="findings_single_app_${APP_NAME}.json"
+            MODE="POLICY"
+          fi
+
+          CUR="$(find cur_artifact/unzipped -type f -name "${TARGET}" | head -n 1 || true)"
+          if [ -z "$CUR" ]; then
+            echo "Current file not found for ${MODE}: ${TARGET}"
+            find cur_artifact/unzipped -maxdepth 6 -type f -name "findings_single_app_*.json" -print || true
+            exit 1
+          fi
+
+          if [ "${BASELINE_ONLY}" = "1" ]; then
+            echo "# Veracode Findings Diff — ${APP_NAME} (${MODE})" > out/diff/README.md
+            echo "" >> out/diff/README.md
+            echo "Only one reporting snapshot exists. Run reporting again (same mode) to enable diffs." >> out/diff/README.md
+            exit 0
+          fi
+
+          PREV="$(find prev_artifact/unzipped -type f -name "${TARGET}" | head -n 1 || true)"
+          if [ -z "$PREV" ]; then
+            echo "Previous file not found for ${MODE}: ${TARGET}"
+            find prev_artifact/unzipped -maxdepth 6 -type f -name "findings_single_app_*.json" -print || true
+            exit 1
+          fi
+
+          python scripts/diff_reporting_findings.py \
+            --app-name "${APP_NAME}${SANDBOX_NAME:+__sandbox__${SANDBOX_NAME}}" \
+            --current "$CUR" \
+            --previous "$PREV" \
+            --out-dir "out/diff"
+
+      - name: Upload diff outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: veracode-findings-diff
+          path: out/diff/
