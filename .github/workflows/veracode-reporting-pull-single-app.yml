@@ -74,6 +74,27 @@ jobs:
             --output veracode-reporting.sarif \
             --placeholder-uri .veracode/REPORTING_GLOBAL_FINDINGS.md \
             --output-stats veracode-reporting-sarif-stats.json
+            
+      - name: Debug — show missing SARIF paths
+        run: |
+          python - << 'PY'
+          import json, os
+          sarif = json.load(open("veracode-reporting.sarif"))
+          root = os.environ.get("GITHUB_WORKSPACE",".")
+          missing=[]
+          for r in sarif["runs"][0]["results"]:
+              uri = r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+              if uri.startswith(".veracode/"):
+                  continue
+              full = os.path.join(root, uri)
+              if not os.path.isfile(full):
+                  missing.append(uri)
+              if len(missing) >= 30:
+                  break
+          print("MISSING SAMPLE (first 30):")
+          for m in missing:
+              print(m)
+          PY
 
       - name: Upload SARIF to GitHub Code Scanning
         uses: github/codeql-action/upload-sarif@v4
