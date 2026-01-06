@@ -60,7 +60,7 @@ jobs:
           curl -sSLO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
           unzip -o pipeline-scan-LATEST.zip
 
-      - name: Run Veracode Pipeline Scan (ESD enabled for Fix) — debug artifact selection
+      - name: Run Veracode Pipeline Scan (ESD enabled for Fix) — do not fail on findings
         env:
           VERACODE_API_ID: ${{ secrets.VID }}
           VERACODE_API_KEY: ${{ secrets.VKEY }}
@@ -84,6 +84,7 @@ jobs:
 
           echo "Running Pipeline Scan..."
           # NOTE: pipeline-scan.jar uses single-dash flags
+          set +e
           java -jar pipeline-scan.jar \
             -vid "$VERACODE_API_ID" \
             -vkey "$VERACODE_API_KEY" \
@@ -91,9 +92,18 @@ jobs:
             -esd true \
             -jf results.json \
             -fjf filtered_results.json
+          RC=$?
+          set -e
 
+          echo "Pipeline Scan exit code: $RC"
           echo "Generated outputs:"
-          ls -lah results.json filtered_results.json
+          ls -lah results.json filtered_results.json || true
+
+          # Only fail if required outputs are missing
+          if [ ! -f results.json ] || [ ! -f filtered_results.json ]; then
+            echo "ERROR: Pipeline Scan did not produce results.json / filtered_results.json"
+            exit 1
+          fi
 
       - name: Upload pipeline results
         if: always()
@@ -131,6 +141,6 @@ jobs:
           inputFile: veracode_results/filtered_results.json
           language: java
           fixType: batch
-          files: changed
+          files: all
           prComment: true
           createPR: true
