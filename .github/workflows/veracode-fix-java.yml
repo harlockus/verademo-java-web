@@ -60,24 +60,30 @@ jobs:
           curl -sSLO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
           unzip -o pipeline-scan-LATEST.zip
 
-      - name: Run Veracode Pipeline Scan (ESD enabled)
+      - name: Run Veracode Pipeline Scan (ESD enabled) — DO NOT FAIL ON FINDINGS
         env:
           VERACODE_API_ID: ${{ secrets.VID }}
           VERACODE_API_KEY: ${{ secrets.VKEY }}
         run: |
           set -euo pipefail
 
-          echo "Artifacts:"
+          echo "Contents of build_artifact/:"
           ls -lah build_artifact || true
 
           FILE="$(ls -1 build_artifact/*.war build_artifact/*.jar 2>/dev/null | head -n 1 || true)"
           if [ -z "${FILE:-}" ]; then
-            echo "ERROR: No WAR/JAR found"
+            echo "ERROR: No WAR/JAR found in build_artifact/. Check your Maven build output + upload step."
             exit 1
           fi
 
-          echo "Scanning: $FILE"
+          echo "Selected artifact: $FILE"
+          ls -lah "$FILE"
+          file "$FILE" || true
 
+          echo "Running Pipeline Scan..."
+          # IMPORTANT: pipeline-scan.jar exits non-zero when findings exist.
+          # We capture the exit code but do not fail the job on it.
+          set +e
           java -jar pipeline-scan.jar \
             -vid "$VERACODE_API_ID" \
             -vkey "$VERACODE_API_KEY" \
@@ -85,9 +91,18 @@ jobs:
             -esd true \
             -jf results.json \
             -fjf filtered_results.json
+          RC=$?
+          set -e
 
-          echo "Pipeline outputs:"
-          ls -lah results.json filtered_results.json
+          echo "Pipeline Scan exit code: $RC"
+          echo "Generated outputs:"
+          ls -lah results.json filtered_results.json || true
+
+          # Only fail if required outputs are missing (real failure)
+          if [ ! -f results.json ] || [ ! -f filtered_results.json ]; then
+            echo "ERROR: Pipeline Scan did not produce results.json / filtered_results.json"
+            exit 1
+          fi
 
       - name: Upload pipeline results
         if: always()
@@ -111,7 +126,7 @@ jobs:
           name: veracode-pipeline-results
           path: veracode_results
 
-      - name: Verify Fix input
+      - name: Verify Fix input exists
         run: |
           set -euo pipefail
           ls -lah veracode_results
@@ -129,5 +144,5 @@ jobs:
           prComment: true
           createPR: true
 
-          # 🔑 REQUIRED PATH REWRITE (THIS FIXES YOUR ERROR)
+          # Path rewrite so Fix can find JSP files referenced as WEB-INF/...
           source_base_path_1: "WEB-INF/:src/main/webapp/WEB-INF/"
