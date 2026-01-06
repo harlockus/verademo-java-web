@@ -133,7 +133,7 @@ jobs:
           test -f veracode_results/filtered_results.json
 
       - name: Run Veracode Fix (Batch → PR)
-        uses: veracode/veracode-fix-github-action@v1.0.4
+        uses: Veracode/veracode-fix@v1.0.4
         with:
           vid: ${{ secrets.VID }}
           vkey: ${{ secrets.VKEY }}
@@ -143,7 +143,11 @@ jobs:
           files: all
           prComment: true
           createPR: true
+          debug: true
 
-          # Path rewrite so Fix can find JSP files referenced as WEB-INF/...
-          source_base_path_1: "WEB-INF/:src/main/webapp/WEB-INF/"
-          source_base_path_2: "com/:src/main/java/com/"
+          # IMPORTANT: use Veracode’s documented rewrite formats
+          source_base_path_1: "com/:src/main/java/com/"
+          source_base_path_2: "WEB-INF:src/main/webapp/WEB-INF"
+
+          # IMPORTANT: Java Fix does NOT support CWE-78. Filter to supported CWEs.
+          cwe: "80,89,113"
