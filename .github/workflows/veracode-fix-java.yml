@@ -146,3 +146,4 @@ jobs:
 
           # Path rewrite so Fix can find JSP files referenced as WEB-INF/...
           source_base_path_1: "WEB-INF/:src/main/webapp/WEB-INF/"
+          source_base_path_2: "com/:src/main/java/com/"
