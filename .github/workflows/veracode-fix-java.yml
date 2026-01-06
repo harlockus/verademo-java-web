@@ -91,7 +91,7 @@ jobs:
           name: veracode-pipeline-results
 
       - name: Run Veracode Fix (batch + PR)
-        uses: veracode/veracode-fix-github-action@v1
+        uses: veracode/veracode-fix-github-action@v1.0.4
         with:
           vid: ${{ secrets.VID }}
           vkey: ${{ secrets.VKEY }}
