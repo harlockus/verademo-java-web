@@ -1,0 +1,106 @@
+name: Veracode Fix (Java) — Pipeline Scan → Fix PR
+
+on:
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build with Maven
+        run: mvn -q -DskipTests clean package
+
+      - name: Upload build artifact (WAR/JAR)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-build
+          path: |
+            target/*.war
+            target/*.jar
+
+  pipeline_scan:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: app-build
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Download Pipeline Scan tool
+        run: |
+          curl -sSLO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+          unzip -o pipeline-scan-LATEST.zip
+
+      - name: Run Pipeline Scan (ESD required for Fix)
+        continue-on-error: true
+        run: |
+          # pick first WAR/JAR found
+          FILE="$(ls -1 *.war *.jar 2>/dev/null | head -n 1)"
+          echo "Scanning artifact: $FILE"
+          java -jar pipeline-scan.jar \
+            --veracode_api_id "${{ secrets.VID }}" \
+            --veracode_api_key "${{ secrets.VKEY }}" \
+            --file "$FILE" \
+            --esd true \
+            --json_output_file results.json \
+            --filtered_json_output_file filtered_results.json
+
+      - name: Upload pipeline results
+        uses: actions/upload-artifact@v4
+        with:
+          name: veracode-pipeline-results
+          path: |
+            results.json
+            filtered_results.json
+
+  veracode_fix:
+    needs: pipeline_scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download pipeline results
+        uses: actions/download-artifact@v4
+        with:
+          name: veracode-pipeline-results
+
+      - name: Run Veracode Fix (batch + PR)
+        uses: veracode/veracode-fix-github-action@v1
+        with:
+          vid: ${{ secrets.VID }}
+          vkey: ${{ secrets.VKEY }}
+          inputFile: filtered_results.json
+          language: java
+          fixType: batch
+          files: changed
+          prComment: true
+          createPR: true
+          # Optional path rewrites if scan paths don't match repo paths:
+          # source_base_path_1: "com/:src/main/java/com/"
+          # source_base_path_2: "WEB-INF:src/main/webapp/WEB-INF"
