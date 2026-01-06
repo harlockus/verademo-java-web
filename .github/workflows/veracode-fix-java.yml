@@ -22,10 +22,12 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Build with Maven
-        run: mvn -q -DskipTests clean package
+      - name: Build with Maven (creates target/*.war or target/*.jar)
+        run: |
+          mvn -q -DskipTests clean package
+          ls -la target || true
 
-      - name: Upload build artifact (WAR/JAR)
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-build
@@ -44,6 +46,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: app-build
+          path: build_artifact
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -51,26 +54,42 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Download Pipeline Scan tool
+      - name: Download Veracode Pipeline Scan tool
         run: |
           curl -sSLO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
           unzip -o pipeline-scan-LATEST.zip
 
-      - name: Run Pipeline Scan (ESD required for Fix)
+      - name: Run Veracode Pipeline Scan (ESD enabled for Fix)
         continue-on-error: true
+        env:
+          VERACODE_API_ID: ${{ secrets.VID }}
+          VERACODE_API_KEY: ${{ secrets.VKEY }}
         run: |
-          # pick first WAR/JAR found
-          FILE="$(ls -1 *.war *.jar 2>/dev/null | head -n 1)"
+          set -euo pipefail
+
+          FILE="$(ls -1 build_artifact/*.war build_artifact/*.jar 2>/dev/null | head -n 1)"
+          if [ -z "${FILE:-}" ]; then
+            echo "No WAR/JAR found in build_artifact/. Check your Maven build output."
+            ls -la build_artifact || true
+            exit 1
+          fi
+
           echo "Scanning artifact: $FILE"
+
+          # NOTE: pipeline-scan.jar uses single-dash flags, not --flags
           java -jar pipeline-scan.jar \
-            --veracode_api_id "${{ secrets.VID }}" \
-            --veracode_api_key "${{ secrets.VKEY }}" \
-            --file "$FILE" \
-            --esd true \
-            --json_output_file results.json \
-            --filtered_json_output_file filtered_results.json
+            -vid "$VERACODE_API_ID" \
+            -vkey "$VERACODE_API_KEY" \
+            -f "$FILE" \
+            -esd true \
+            -jf results.json \
+            -fjf filtered_results.json
+
+          echo "Generated:"
+          ls -lh results.json filtered_results.json
 
       - name: Upload pipeline results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: veracode-pipeline-results
@@ -89,18 +108,22 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: veracode-pipeline-results
+          path: veracode_results
+
+      - name: Verify required input exists
+        run: |
+          set -euo pipefail
+          ls -lh veracode_results || true
+          test -f veracode_results/filtered_results.json
 
       - name: Run Veracode Fix (batch + PR)
         uses: veracode/veracode-fix-github-action@v1.0.4
         with:
           vid: ${{ secrets.VID }}
           vkey: ${{ secrets.VKEY }}
-          inputFile: filtered_results.json
+          inputFile: veracode_results/filtered_results.json
           language: java
           fixType: batch
           files: changed
           prComment: true
           createPR: true
-          # Optional path rewrites if scan paths don't match repo paths:
-          # source_base_path_1: "com/:src/main/java/com/"
-          # source_base_path_2: "WEB-INF:src/main/webapp/WEB-INF"
