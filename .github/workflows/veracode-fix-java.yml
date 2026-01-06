@@ -25,6 +25,7 @@ jobs:
       - name: Build with Maven (creates target/*.war or target/*.jar)
         run: |
           mvn -q -DskipTests clean package
+          echo "Listing target/:"
           ls -la target || true
 
       - name: Upload build artifact
@@ -59,24 +60,30 @@ jobs:
           curl -sSLO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
           unzip -o pipeline-scan-LATEST.zip
 
-      - name: Run Veracode Pipeline Scan (ESD enabled for Fix)
-        continue-on-error: true
+      - name: Run Veracode Pipeline Scan (ESD enabled for Fix) — debug artifact selection
         env:
           VERACODE_API_ID: ${{ secrets.VID }}
           VERACODE_API_KEY: ${{ secrets.VKEY }}
         run: |
           set -euo pipefail
 
-          FILE="$(ls -1 build_artifact/*.war build_artifact/*.jar 2>/dev/null | head -n 1)"
+          echo "Contents of build_artifact/:"
+          ls -lah build_artifact || true
+
+          FILE="$(ls -1 build_artifact/*.war build_artifact/*.jar 2>/dev/null | head -n 1 || true)"
           if [ -z "${FILE:-}" ]; then
-            echo "No WAR/JAR found in build_artifact/. Check your Maven build output."
-            ls -la build_artifact || true
+            echo "ERROR: No WAR/JAR found in build_artifact/. Check your Maven build output + upload step."
             exit 1
           fi
 
-          echo "Scanning artifact: $FILE"
+          echo "Selected artifact: $FILE"
+          echo "File details:"
+          ls -lah "$FILE"
+          echo "File type:"
+          file "$FILE" || true
 
-          # NOTE: pipeline-scan.jar uses single-dash flags, not --flags
+          echo "Running Pipeline Scan..."
+          # NOTE: pipeline-scan.jar uses single-dash flags
           java -jar pipeline-scan.jar \
             -vid "$VERACODE_API_ID" \
             -vkey "$VERACODE_API_KEY" \
@@ -85,8 +92,8 @@ jobs:
             -jf results.json \
             -fjf filtered_results.json
 
-          echo "Generated:"
-          ls -lh results.json filtered_results.json
+          echo "Generated outputs:"
+          ls -lah results.json filtered_results.json
 
       - name: Upload pipeline results
         if: always()
