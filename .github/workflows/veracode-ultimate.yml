@@ -1,0 +1,260 @@
+name: Veracode Ultimate (Pipeline Scan + SARIF + Fix Auto-Detect)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [ main, master ]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+  security-events: write
+
+jobs:
+  pipeline_scan_and_sarif:
+    runs-on: ubuntu-latest
+    outputs:
+      has_results: ${{ steps.scan_outputs.outputs.has_results }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure placeholder file exists (SARIF)
+        run: |
+          mkdir -p .veracode
+          cat > .veracode/PIPELINE_SCAN_GLOBAL_FINDINGS.md << 'EOF'
+          # Veracode Pipeline Scan – Global Findings Placeholder
+          Findings without a resolvable repo file+line are anchored here.
+          EOF
+
+      - name: Create source zip (exclude node_modules)
+        run: |
+          zip -r pipeline-src.zip . -x "**/node_modules/**" -x "**/.git/**"
+
+      - name: Set up Java (Pipeline Scan tool)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Download Pipeline Scan tool
+        run: |
+          curl -sSLO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+          unzip -o pipeline-scan-LATEST.zip
+
+      - name: Run Pipeline Scan (do not fail job on findings)
+        id: scan_outputs
+        env:
+          VERACODE_API_ID: ${{ secrets.VERACODE_API_ID }}
+          VERACODE_API_KEY: ${{ secrets.VERACODE_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          set +e
+          java -jar pipeline-scan.jar \
+            -vid "${VERACODE_API_ID}" \
+            -vkey "${VERACODE_API_KEY}" \
+            -f "pipeline-src.zip" \
+            -esd true \
+            -jf "results.json" \
+            -fjf "filtered_results.json"
+          RC=$?
+          set -e
+
+          echo "Pipeline Scan exit code: $RC"
+          ls -lah results.json filtered_results.json || true
+
+          if [ -f results.json ] && [ -f filtered_results.json ]; then
+            echo "has_results=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_results=false" >> "$GITHUB_OUTPUT"
+            echo "ERROR: Pipeline Scan did not produce results.json / filtered_results.json"
+            exit 1
+          fi
+
+      - name: Setup Python (SARIF conversion)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Convert Pipeline JSON -> SARIF
+        run: |
+          python scripts/pipeline_results_to_sarif.py \
+            --input filtered_results.json \
+            --output veracode-pipeline.sarif \
+            --placeholder-uri .veracode/PIPELINE_SCAN_GLOBAL_FINDINGS.md \
+            --output-stats veracode-pipeline-sarif-stats.json
+
+      - name: Upload SARIF to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: veracode-pipeline.sarif
+          category: veracode-pipeline
+          wait-for-processing: true
+
+      - name: Upload pipeline artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: veracode-pipeline-scan
+          path: |
+            results.json
+            filtered_results.json
+            veracode-pipeline.sarif
+            veracode-pipeline-sarif-stats.json
+            .veracode/PIPELINE_SCAN_GLOBAL_FINDINGS.md
+
+  detect_fix_languages:
+    needs: pipeline_scan_and_sarif
+    if: needs.pipeline_scan_and_sarif.outputs.has_results == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.detector.outputs.matrix }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect Fix languages (repo-based, no broken pipes)
+        id: detector
+        run: |
+          set -euo pipefail
+
+          found=()
+
+          add_lang () {
+            local lang="$1"
+            for x in "${found[@]:-}"; do
+              if [ "$x" = "$lang" ]; then
+                return 0
+              fi
+            done
+            found+=("$lang")
+          }
+
+          # Java
+          if find . -type f -name "*.java" -not -path "./.git/*" -print -quit | grep -q .; then
+            add_lang "java"
+          fi
+
+          # C#
+          if find . -type f \( -name "*.cs" -o -name "*.csproj" -o -name "*.sln" \) -not -path "./.git/*" -print -quit | grep -q .; then
+            add_lang "csharp"
+          fi
+
+          # JavaScript / TypeScript
+          if find . -type f \( -name "*.js" -o -name "*.ts" -o -name "package.json" \) -not -path "./.git/*" -print -quit | grep -q .; then
+            add_lang "javascript"
+          fi
+
+          # Python
+          if find . -type f \( -name "*.py" -o -name "requirements.txt" -o -name "pyproject.toml" \) -not -path "./.git/*" -print -quit | grep -q .; then
+            add_lang "python"
+          fi
+
+          # Kotlin
+          if find . -type f -name "*.kt" -not -path "./.git/*" -print -quit | grep -q .; then
+            add_lang "kotlin"
+          fi
+
+          # Scala
+          if find . -type f -name "*.scala" -not -path "./.git/*" -print -quit | grep -q .; then
+            add_lang "scala"
+          fi
+
+          # PHP
+          if find . -type f \( -name "*.php" -o -name "composer.json" \) -not -path "./.git/*" -print -quit | grep -q .; then
+            add_lang "php"
+          fi
+
+          # Go
+          if find . -type f \( -name "*.go" -o -name "go.mod" \) -not -path "./.git/*" -print -quit | grep -q .; then
+            add_lang "go"
+          fi
+
+          if [ ${#found[@]} -eq 0 ]; then
+            echo "No Fix-supported languages detected. Skipping Fix."
+            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          json='{"include":['
+          first=1
+          for lang in "${found[@]}"; do
+            if [ $first -eq 0 ]; then json+=','; fi
+            first=0
+            json+='{"language":"'"$lang"'"}'
+          done
+          json+=']}'
+
+          echo "Detected Fix languages: ${found[*]}"
+          echo "matrix=$json" >> "$GITHUB_OUTPUT"
+
+  veracode_fix_detected:
+    needs: [pipeline_scan_and_sarif, detect_fix_languages]
+    if: needs.detect_fix_languages.outputs.matrix != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect_fix_languages.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download pipeline results
+        uses: actions/download-artifact@v4
+        with:
+          name: veracode-pipeline-scan
+          path: pipeline_out
+
+      - name: Verify Fix input exists
+        run: |
+          set -euo pipefail
+          test -f pipeline_out/filtered_results.json
+
+      # Choose ONE best root for JS/TS so we stay within Fix's 3 mapping limit.
+      - name: Detect best JS/TS root for Fix mapping
+        if: matrix.language == 'javascript'
+        run: |
+          set -euo pipefail
+          pick=""
+          for d in src routes frontend lib app server client packages; do
+            if [ -d "$d" ]; then
+              pick="$d"
+              break
+            fi
+          done
+
+          if [ -n "$pick" ]; then
+            echo "JS_ROOT=$pick" >> "$GITHUB_ENV"
+            echo "Detected JS_ROOT=$pick"
+          else
+            echo "JS_ROOT=" >> "$GITHUB_ENV"
+            echo "No common JS root folder found; defaulting to src/"
+          fi
+
+      - name: Run Veracode Fix (Batch PR) — language=${{ matrix.language }}
+        continue-on-error: true
+        uses: Veracode/veracode-fix@v1.0.4
+        with:
+          vid: ${{ secrets.VID }}
+          vkey: ${{ secrets.VKEY }}
+          inputFile: pipeline_out/filtered_results.json
+          language: ${{ matrix.language }}
+          fixType: batch
+          files: all
+          prComment: true
+          createPR: true
+
+          # Mapping slot 1: Java package paths
+          source_base_path_1: "com/:src/main/java/com/"
+
+          # Mapping slot 2: Java webapp JSPs
+          source_base_path_2: "WEB-INF/:src/main/webapp/WEB-INF/"
+
+          # Mapping slot 3: dynamic for JS/TS repos (ONLY 1 slot available in Fix)
+          # If JS_ROOT is empty, we use src/:src/ as a safe default.
+          source_base_path_3: "${{ env.JS_ROOT && format('{0}/:{0}/', env.JS_ROOT) || 'src/:src/' }}"
