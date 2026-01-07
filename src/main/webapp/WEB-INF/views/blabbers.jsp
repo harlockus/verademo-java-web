@@ -101,7 +101,7 @@
 										<img src="resources/images/<%= blabber.getUsername() %>.png" />
 									</td>
 									<td class="commenterName">
-										<%= blabber.getBlabName() %>
+										<%= blabber.getBlabName() %><%= ESAPI.encoder().encodeForHTMLAttribute(blabber.getBlabName()) %>										<%= blabber.getBlabName() %>
 									</td>
 									<td class="commenterJoinDate">
 										<%= blabber.getCreatedDateString() %>
