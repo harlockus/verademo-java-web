@@ -106,7 +106,7 @@
 									</div>
 									<div class="blockquote">
 										<p class="">
-											"<%= comment.getContent() %>"
+											"<%= comment.getContent() %>"<%= Encode.forHtml(comment.getContent()) %>											"<%= comment.getContent() %>"
 										</p>
 										<span class="date sub-text">by <%= comment.getAuthor().getBlabName() %>
 											on <%= comment.getTimestampString() %></span><br>
