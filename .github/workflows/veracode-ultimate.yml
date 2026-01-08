@@ -117,7 +117,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Detect Fix languages (repo-based, no broken pipes)
+      - name: Detect Fix languages (repo-based)
         id: detector
         run: |
           set -euo pipefail
@@ -134,49 +134,18 @@ jobs:
             found+=("$lang")
           }
 
-          # Java
-          if find . -type f -name "*.java" -not -path "./.git/*" -print -quit | grep -q .; then
-            add_lang "java"
-          fi
-
-          # C#
-          if find . -type f \( -name "*.cs" -o -name "*.csproj" -o -name "*.sln" \) -not -path "./.git/*" -print -quit | grep -q .; then
-            add_lang "csharp"
-          fi
-
-          # JavaScript / TypeScript
-          if find . -type f \( -name "*.js" -o -name "*.ts" -o -name "package.json" \) -not -path "./.git/*" -print -quit | grep -q .; then
-            add_lang "javascript"
-          fi
-
-          # Python
-          if find . -type f \( -name "*.py" -o -name "requirements.txt" -o -name "pyproject.toml" \) -not -path "./.git/*" -print -quit | grep -q .; then
-            add_lang "python"
-          fi
-
-          # Kotlin
-          if find . -type f -name "*.kt" -not -path "./.git/*" -print -quit | grep -q .; then
-            add_lang "kotlin"
-          fi
-
-          # Scala
-          if find . -type f -name "*.scala" -not -path "./.git/*" -print -quit | grep -q .; then
-            add_lang "scala"
-          fi
-
-          # PHP
-          if find . -type f \( -name "*.php" -o -name "composer.json" \) -not -path "./.git/*" -print -quit | grep -q .; then
-            add_lang "php"
-          fi
-
-          # Go
-          if find . -type f \( -name "*.go" -o -name "go.mod" \) -not -path "./.git/*" -print -quit | grep -q .; then
-            add_lang "go"
-          fi
+          if find . -type f -name "*.java" -not -path "./.git/*" -print -quit | grep -q .; then add_lang "java"; fi
+          if find . -type f \( -name "*.cs" -o -name "*.csproj" -o -name "*.sln" \) -not -path "./.git/*" -print -quit | grep -q .; then add_lang "csharp"; fi
+          if find . -type f \( -name "*.js" -o -name "*.ts" -o -name "package.json" \) -not -path "./.git/*" -print -quit | grep -q .; then add_lang "javascript"; fi
+          if find . -type f \( -name "*.py" -o -name "requirements.txt" -o -name "pyproject.toml" \) -not -path "./.git/*" -print -quit | grep -q .; then add_lang "python"; fi
+          if find . -type f -name "*.kt" -not -path "./.git/*" -print -quit | grep -q .; then add_lang "kotlin"; fi
+          if find . -type f -name "*.scala" -not -path "./.git/*" -print -quit | grep -q .; then add_lang "scala"; fi
+          if find . -type f \( -name "*.php" -o -name "composer.json" \) -not -path "./.git/*" -print -quit | grep -q .; then add_lang "php"; fi
+          if find . -type f \( -name "*.go" -o -name "go.mod" \) -not -path "./.git/*" -print -quit | grep -q .; then add_lang "go"; fi
 
           if [ ${#found[@]} -eq 0 ]; then
-            echo "No Fix-supported languages detected. Skipping Fix."
             echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+            echo "Detected Fix languages: (none)"
             exit 0
           fi
 
@@ -193,9 +162,12 @@ jobs:
           echo "matrix=$json" >> "$GITHUB_OUTPUT"
 
   veracode_fix_detected:
+    # Fix only runs on PRs (keeps it fast and avoids long manual hangs)
+    if: github.event_name == 'pull_request' && needs.detect_fix_languages.outputs.matrix != ''
     needs: [pipeline_scan_and_sarif, detect_fix_languages]
-    if: needs.detect_fix_languages.outputs.matrix != ''
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.detect_fix_languages.outputs.matrix) }}
@@ -215,7 +187,6 @@ jobs:
           set -euo pipefail
           test -f pipeline_out/filtered_results.json
 
-      # Choose ONE best root for JS/TS so we stay within Fix's 3 mapping limit.
       - name: Detect best JS/TS root for Fix mapping
         if: matrix.language == 'javascript'
         run: |
@@ -249,12 +220,7 @@ jobs:
           prComment: true
           createPR: true
 
-          # Mapping slot 1: Java package paths
+          # Fix supports ONLY source_base_path_1..3
           source_base_path_1: "com/:src/main/java/com/"
-
-          # Mapping slot 2: Java webapp JSPs
           source_base_path_2: "WEB-INF/:src/main/webapp/WEB-INF/"
-
-          # Mapping slot 3: dynamic for JS/TS repos (ONLY 1 slot available in Fix)
-          # If JS_ROOT is empty, we use src/:src/ as a safe default.
           source_base_path_3: "${{ env.JS_ROOT && format('{0}/:{0}/', env.JS_ROOT) || 'src/:src/' }}"
