@@ -56,6 +56,7 @@ jobs:
           VERACODE_API_KEY: ${{ secrets.VERACODE_API_KEY }}
         run: |
           set -euo pipefail
+
           set +e
           java -jar pipeline-scan.jar \
             -vid "${VERACODE_API_ID}" \
@@ -127,8 +128,10 @@ jobs:
         id: mk
         run: |
           python - << 'PY'
-          import json
+          import json, os
 
+          # Languages supported by Fix GitHub Action: java,csharp,javascript,python,kotlin,scala,php,go
+          # CWEs below are intended for batch-mode usage.
           matrix = {
             "include": [
               {"language":"java","cwe":"80,89,113,117,159,209,331,404,597,611","sbp1":"com/:src/main/java/com/","sbp2":"WEB-INF:src/main/webapp/WEB-INF","sbp3":""},
@@ -142,36 +145,17 @@ jobs:
             ]
           }
 
-          # Single-line JSON for GitHub output
-          print(json.dumps(matrix, separators=(",", ":")))
+          matrix_str = json.dumps(matrix, separators=(",", ":"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+            f.write(f"matrix={matrix_str}\n")
+
+          print("Matrix output written.")
           PY
-        shell: bash
-
-      - name: Set matrix output
-        run: |
-          set -euo pipefail
-          MATRIX="$(python - << 'PY'
-          import json
-          matrix = {
-            "include": [
-              {"language":"java","cwe":"80,89,113,117,159,209,331,404,597,611","sbp1":"com/:src/main/java/com/","sbp2":"WEB-INF:src/main/webapp/WEB-INF","sbp3":""},
-              {"language":"kotlin","cwe":"80,89,113,117,331,404","sbp1":"com/:src/main/java/com/","sbp2":"","sbp3":""},
-              {"language":"scala","cwe":"78,80,117,611","sbp1":"com/:src/main/java/com/","sbp2":"","sbp3":""},
-              {"language":"csharp","cwe":"80,89,117,209,316,331,352,404,611","sbp1":"src/:src/","sbp2":"","sbp3":""},
-              {"language":"javascript","cwe":"80,89,113,117,209,352,601,611,614","sbp1":"src/:src/","sbp2":"","sbp3":""},
-              {"language":"python","cwe":"78,80,89,295,331,757","sbp1":"src/:src/","sbp2":"app/:app/","sbp3":""},
-              {"language":"php","cwe":"80,89,117","sbp1":"src/:src/","sbp2":"","sbp3":""},
-              {"language":"go","cwe":"73,78,117","sbp1":"src/:src/","sbp2":"","sbp3":""}
-            ]
-          }
-          print(json.dumps(matrix, separators=(",", ":")))
-          PY)"
-          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
         shell: bash
 
   veracode_fix_universal:
     needs: [pipeline_scan_and_sarif, build_fix_matrix]
-    if: (github.event_name == 'pull_request' || inputs.run_fix == 'true')
+    if: (github.event_name == 'pull_request' || inputs.run_fix == 'true') && needs.build_fix_matrix.outputs.matrix != ''
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
