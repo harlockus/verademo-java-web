@@ -1,12 +1,12 @@
-name: Veracode Ultimate (Pipeline Scan + SARIF + Fix Auto-Detect)
+name: Veracode Ultimate (Pipeline Scan + SARIF + Fix Universal)
 
 on:
   workflow_dispatch:
     inputs:
       run_fix:
-        description: "Run Veracode Fix (may take time)"
+        description: "Run Veracode Fix (batch PR) after scan"
         required: true
-        default: "false"
+        default: "true"
   pull_request:
     branches: [ main, master ]
 
@@ -49,7 +49,7 @@ jobs:
           curl -sSLO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
           unzip -o pipeline-scan-LATEST.zip
 
-      - name: Run Pipeline Scan (do not fail job on findings)
+      - name: Run Pipeline Scan (ESD enabled, do not fail job on findings)
         id: scan_outputs
         env:
           VERACODE_API_ID: ${{ secrets.VERACODE_API_ID }}
@@ -57,6 +57,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Pipeline Scan exits non-zero when findings exist. Capture RC but keep going.
           set +e
           java -jar pipeline-scan.jar \
             -vid "${VERACODE_API_ID}" \
@@ -111,98 +112,181 @@ jobs:
             veracode-pipeline-sarif-stats.json
             .veracode/PIPELINE_SCAN_GLOBAL_FINDINGS.md
 
-  detect_fix_languages:
+  build_fix_matrix:
     needs: pipeline_scan_and_sarif
     if: needs.pipeline_scan_and_sarif.outputs.has_results == 'true'
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.detector.outputs.matrix }}
+      matrix: ${{ steps.mk.outputs.matrix }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Detect Fix languages (repo-based)
-        id: detector
+      - name: Download scan outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: veracode-pipeline-scan
+          path: pipeline_out
+
+      - name: Setup Python (matrix builder)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build Fix matrix from filtered_results.json (languages + batch-supported CWEs)
+        id: mk
         run: |
           set -euo pipefail
-          found=()
 
-          add_lang () {
-            local lang="$1"
-            local cwe="$2"
-            found+=("{\"language\":\"$lang\",\"cwe\":\"$cwe\"}")
+          python - << 'PY' > matrix.json
+          import json, os
+          from collections import Counter
+
+          # GitHub Action supported languages:
+          # java, csharp, javascript, python, kotlin, scala, php, go   [oai_citation:3‡Veracode Docs](https://docs.veracode.com/r/Veracode_Fix_GitHub_Action?utm_source=chatgpt.com)
+          SUPPORTED = {"java","csharp","javascript","python","kotlin","scala","php","go"}
+
+          # Batch-supported CWEs per language from "About Veracode Fix" tables.  [oai_citation:4‡Veracode Docs](https://docs.veracode.com/r/About_Veracode_Fix)
+          # IMPORTANT: We include only CWEs with Batch fix support, because this workflow uses fixType: batch.
+          CWES_BATCH = {
+            "csharp":     "80,89,117,209,316,331,352,404,611",
+            "go":         "73,78,117",
+            "java":       "80,89,113,117,159,209,331,404,597,611",
+            "javascript": "80,89,113,117,209,352,601,611,614",
+            "kotlin":     "80,89,113,117,331,404",
+            "php":        "80,89,117",
+            "python":     "78,80,89,295,331,757",
+            "scala":      "78,80,117,611",
           }
 
-          # CWE sets from Veracode Fix docs/blog (supported CWEs by language).
-          # Source: Veracode Fix GitHub Action + Fix support tables.  [oai_citation:1‡Veracode](https://www.veracode.com/blog/new-in-veracode-fix-additional-language-support-and-batch-fix/?utm_source=chatgpt.com)
+          EXT_TO_LANG = {
+            ".java": "java",
+            ".kt": "kotlin",
+            ".scala": "scala",
+            ".cs": "csharp",
+            ".js": "javascript",
+            ".ts": "javascript",
+            ".jsx": "javascript",
+            ".tsx": "javascript",
+            ".py": "python",
+            ".php": "php",
+            ".go": "go",
+          }
 
-          if find . -type f -name "*.java" -not -path "./.git/*" -print -quit | grep -q .; then
-            add_lang "java" "73,80,89,113,117,327,331,382,470,597,601,611"
-          fi
+          def norm(p: str) -> str:
+            return (p or "").replace("\\","/").strip().lstrip("./").lstrip("/")
 
-          if find . -type f \( -name "*.cs" -o -name "*.csproj" -o -name "*.sln" \) -not -path "./.git/*" -print -quit | grep -q .; then
-            add_lang "csharp" "80,89,201,209,259,352,404,601,611,798"
-          fi
+          def src_path(finding: dict):
+            files = finding.get("files") or {}
+            src = files.get("source_file") or {}
+            p = src.get("file") or src.get("upload_file")
+            return norm(str(p)) if p else None
 
-          if find . -type f \( -name "*.js" -o -name "*.ts" -o -name "package.json" \) -not -path "./.git/*" -print -quit | grep -q .; then
-            add_lang "javascript" "73,78,80,89,113,117,327,611,614"
-          fi
+          def lang_from_path(p: str):
+            pl = p.lower()
+            for ext, lang in EXT_TO_LANG.items():
+              if pl.endswith(ext):
+                return lang
+            return None
 
-          if find . -type f \( -name "*.py" -o -name "requirements.txt" -o -name "pyproject.toml" \) -not -path "./.git/*" -print -quit | grep -q .; then
-            add_lang "python" "73,78,80,89,295,327,331,757"
-          fi
+          with open("pipeline_out/filtered_results.json","r",encoding="utf-8") as f:
+            data = json.load(f)
 
-          if find . -type f -name "*.kt" -not -path "./.git/*" -print -quit | grep -q .; then
-            add_lang "kotlin" "80,89,113,117,331"
-          fi
+          findings = data.get("findings", []) if isinstance(data, dict) else []
 
-          if find . -type f -name "*.scala" -not -path "./.git/*" -print -quit | grep -q .; then
-            add_lang "scala" "78,80,89,117,611"
-          fi
+          lang_paths = {k: [] for k in SUPPORTED}
+          for x in findings:
+            if not isinstance(x, dict):
+              continue
+            p = src_path(x)
+            if not p:
+              continue
+            lang = lang_from_path(p)
+            if lang in SUPPORTED:
+              lang_paths[lang].append(p)
 
-          if find . -type f \( -name "*.php" -o -name "composer.json" \) -not -path "./.git/*" -print -quit | grep -q .; then
-            add_lang "php" "73,78,80,89,117"
-          fi
+          include = []
 
-          if find . -type f \( -name "*.go" -o -name "go.mod" \) -not -path "./.git/*" -print -quit | grep -q .; then
-            add_lang "go" "73,78,117"
-          fi
+          # Helper: choose a best top-level root for JS/Py/etc based on most common first segment
+          def choose_root(paths, candidates):
+            cnt = Counter()
+            for p in paths:
+              parts = p.split("/")
+              if parts and parts[0] in candidates:
+                cnt[parts[0]] += 1
+            if cnt:
+              return cnt.most_common(1)[0][0]
+            # fallback: pick first existing directory among candidates
+            for d in candidates:
+              if os.path.isdir(d):
+                return d
+            return "src"
 
-          if [ ${#found[@]} -eq 0 ]; then
-            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
-            echo "Detected Fix languages: (none)"
-            exit 0
-          fi
+          JS_CANDIDATES = ["src","routes","frontend","lib","app","server","client","packages"]
+          PY_CANDIDATES = ["src","app","server","lib"]
 
-          json='{"include":['
-          for i in "${!found[@]}"; do
-            json+="${found[$i]}"
-            if [ "$i" -lt "$((${#found[@]}-1))" ]; then json+=','; fi
-          done
-          json+=']}'
+          for lang, paths in lang_paths.items():
+            if not paths:
+              continue
+            cwe = CWES_BATCH.get(lang)
+            if not cwe:
+              # if not defined, skip; keeps workflow stable
+              continue
 
-          echo "matrix=$json" >> "$GITHUB_OUTPUT"
-          echo "Detected Fix matrix: $json"
+            sbp1 = sbp2 = sbp3 = ""
 
-  veracode_fix_detected:
-    needs: [pipeline_scan_and_sarif, detect_fix_languages]
-    if: (github.event_name == 'pull_request' || inputs.run_fix == 'true') && needs.detect_fix_languages.outputs.matrix != ''
+            if lang in ("java","kotlin","scala"):
+              sbp1 = "com/:src/main/java/com/"
+              sbp2 = "WEB-INF:src/main/webapp/WEB-INF"
+              sbp3 = ""
+            elif lang == "javascript":
+              root = choose_root(paths, JS_CANDIDATES)
+              sbp1 = f"{root}/:{root}/"
+              sbp2 = ""
+              sbp3 = ""
+            elif lang == "python":
+              root = choose_root(paths, PY_CANDIDATES)
+              sbp1 = f"{root}/:{root}/"
+              sbp2 = ""
+              sbp3 = ""
+            else:
+              # go/php/csharp: try "src/" identity mapping
+              sbp1 = "src/:src/"
+              sbp2 = ""
+              sbp3 = ""
+
+            include.append({
+              "language": lang,
+              "cwe": cwe,
+              "sbp1": sbp1,
+              "sbp2": sbp2,
+              "sbp3": sbp3
+            })
+
+          out = {"include": include}
+          print(json.dumps(out))
+          PY
+
+          MATRIX="$(cat matrix.json)"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Fix matrix: $MATRIX"
+
+  veracode_fix_universal:
+    needs: [pipeline_scan_and_sarif, build_fix_matrix]
+    if: (github.event_name == 'pull_request' || inputs.run_fix == 'true')
     runs-on: ubuntu-latest
-
-    # Make it "go through" — generous cap instead of short cancellation.
-    # You can still manually cancel from the UI if needed.
     timeout-minutes: 120
-
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.detect_fix_languages.outputs.matrix) }}
+      max-parallel: 1
+      matrix: ${{ fromJson(needs.build_fix_matrix.outputs.matrix) }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download pipeline results
+      - name: Download scan outputs
         uses: actions/download-artifact@v4
         with:
           name: veracode-pipeline-scan
@@ -213,27 +297,7 @@ jobs:
           set -euo pipefail
           test -f pipeline_out/filtered_results.json
 
-      - name: Detect best JS/TS root for Fix mapping
-        if: matrix.language == 'javascript'
-        run: |
-          set -euo pipefail
-          pick=""
-          for d in src routes frontend lib app server client packages; do
-            if [ -d "$d" ]; then
-              pick="$d"
-              break
-            fi
-          done
-          if [ -n "$pick" ]; then
-            echo "JS_ROOT=$pick" >> "$GITHUB_ENV"
-            echo "Detected JS_ROOT=$pick"
-          else
-            echo "JS_ROOT=" >> "$GITHUB_ENV"
-            echo "No common JS root folder found; defaulting to src/"
-          fi
-
-      - name: Run Veracode Fix (Batch PR) — language=${{ matrix.language }}
-        # Non-blocking: Fix should not break scan visibility even if it can't fix anything.
+      - name: Run Veracode Fix (Batch → PR) — language=${{ matrix.language }}
         continue-on-error: true
         uses: Veracode/veracode-fix@v1.0.4
         with:
@@ -246,8 +310,6 @@ jobs:
           files: all
           prComment: true
           createPR: true
-
-          # Fix supports ONLY source_base_path_1..3
-          source_base_path_1: "com/:src/main/java/com/"
-          source_base_path_2: "WEB-INF/:src/main/webapp/WEB-INF/"
-          source_base_path_3: "${{ env.JS_ROOT && format('{0}/:{0}/', env.JS_ROOT) || 'src/:src/' }}"
+          source_base_path_1: ${{ matrix.sbp1 }}
+          source_base_path_2: ${{ matrix.sbp2 }}
+          source_base_path_3: ${{ matrix.sbp3 }}
