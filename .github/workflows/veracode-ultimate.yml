@@ -119,39 +119,66 @@ jobs:
       matrix: ${{ steps.mk.outputs.matrix }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Setup Python (matrix builder)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      - name: Build Fix matrix (all Fix-supported languages + batch CWEs)
+      - name: Build Fix matrix (single-line JSON output)
         id: mk
         run: |
-          set -euo pipefail
+          python - << 'PY'
+          import json
 
-          # Supported languages by Fix GitHub Action: java,csharp,javascript,python,kotlin,scala,php,go 
-          # CWEs listed below are "Batch fix" CWEs from About Veracode Fix 
-          cat > matrix.json << 'EOF'
-          {
+          # Fix GitHub Action supported languages: java,csharp,javascript,python,kotlin,scala,php,go
+          # CWEs below are batch-fix CWEs from "About Veracode Fix" (since we run fixType=batch).
+          matrix = {
             "include": [
-              { "language": "java",       "cwe": "80,89,113,117,159,209,331,404,597,611", "sbp1": "com/:src/main/java/com/", "sbp2": "WEB-INF:src/main/webapp/WEB-INF", "sbp3": "" },
-              { "language": "kotlin",     "cwe": "80,89,113,117,331,404",                 "sbp1": "com/:src/main/java/com/", "sbp2": "",                               "sbp3": "" },
-              { "language": "scala",      "cwe": "78,80,117,611",                         "sbp1": "com/:src/main/java/com/", "sbp2": "",                               "sbp3": "" },
-
-              { "language": "csharp",     "cwe": "80,89,117,209,316,331,352,404,611",     "sbp1": "src/:src/",               "sbp2": "",                               "sbp3": "" },
-
-              { "language": "javascript", "cwe": "80,89,113,117,209,352,601,611,614",     "sbp1": "src/:src/",               "sbp2": "",                               "sbp3": "" },
-
-              { "language": "python",     "cwe": "78,80,89,295,331,757",                  "sbp1": "src/:src/",               "sbp2": "app/:app/",                      "sbp3": "" },
-
-              { "language": "php",        "cwe": "80,89,117",                             "sbp1": "src/:src/",               "sbp2": "",                               "sbp3": "" },
-
-              { "language": "go",         "cwe": "73,78,117",                             "sbp1": "src/:src/",               "sbp2": "",                               "sbp3": "" }
+              {"language":"java","cwe":"80,89,113,117,159,209,331,404,597,611","sbp1":"com/:src/main/java/com/","sbp2":"WEB-INF:src/main/webapp/WEB-INF","sbp3":""},
+              {"language":"kotlin","cwe":"80,89,113,117,331,404","sbp1":"com/:src/main/java/com/","sbp2":"","sbp3":""},
+              {"language":"scala","cwe":"78,80,117,611","sbp1":"com/:src/main/java/com/","sbp2":"","sbp3":""},
+              {"language":"csharp","cwe":"80,89,117,209,316,331,352,404,611","sbp1":"src/:src/","sbp2":"","sbp3":""},
+              {"language":"javascript","cwe":"80,89,113,117,209,352,601,611,614","sbp1":"src/:src/","sbp2":"","sbp3":""},
+              {"language":"python","cwe":"78,80,89,295,331,757","sbp1":"src/:src/","sbp2":"app/:app/","sbp3":""},
+              {"language":"php","cwe":"80,89,117","sbp1":"src/:src/","sbp2":"","sbp3":""},
+              {"language":"go","cwe":"73,78,117","sbp1":"src/:src/","sbp2":"","sbp3":""},
             ]
           }
-          EOF
 
-          MATRIX="$(cat matrix.json)"
+          # IMPORTANT: output must be a single line for GitHub outputs
+          print(json.dumps(matrix, separators=(",", ":")))
+          PY
+        shell: bash
+
+      - name: Set matrix output
+        id: setout
+        run: |
+          set -euo pipefail
+          MATRIX="$(python - << 'PY'
+          import json
+          matrix = {
+            "include": [
+              {"language":"java","cwe":"80,89,113,117,159,209,331,404,597,611","sbp1":"com/:src/main/java/com/","sbp2":"WEB-INF:src/main/webapp/WEB-INF","sbp3":""},
+              {"language":"kotlin","cwe":"80,89,113,117,331,404","sbp1":"com/:src/main/java/com/","sbp2":"","sbp3":""},
+              {"language":"scala","cwe":"78,80,117,611","sbp1":"com/:src/main/java/com/","sbp2":"","sbp3":""},
+              {"language":"csharp","cwe":"80,89,117,209,316,331,352,404,611","sbp1":"src/:src/","sbp2":"","sbp3":""},
+              {"language":"javascript","cwe":"80,89,113,117,209,352,601,611,614","sbp1":"src/:src/","sbp2":"","sbp3":""},
+              {"language":"python","cwe":"78,80,89,295,331,757","sbp1":"src/:src/","sbp2":"app/:app/","sbp3":""},
+              {"language":"php","cwe":"80,89,117","sbp1":"src/:src/","sbp2":"","sbp3":""},
+              {"language":"go","cwe":"73,78,117","sbp1":"src/:src/","sbp2":"","sbp3":""},
+            ]
+          }
+          print(json.dumps(matrix, separators=(",", ":")))
+          PY)"
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-          echo "Fix matrix: $MATRIX"
+        shell: bash
+
+      - name: Expose matrix output
+        id: mk
+        run: |
+          # Reuse the output from previous step
+          echo "matrix=${{ steps.setout.outputs.matrix }}" >> "$GITHUB_OUTPUT"
+        shell: bash
 
   veracode_fix_universal:
     needs: [pipeline_scan_and_sarif, build_fix_matrix]
@@ -183,14 +210,14 @@ jobs:
         run: |
           set -euo pipefail
           python - << 'PY'
-          import json, os, sys
+          import json, os
 
           lang = os.environ["LANG"]
           inp = "pipeline_out/filtered_results.json"
           outp = f"pipeline_out/filtered_results_{lang}.json"
 
           LANG_EXTS = {
-            "java": [".java", ".jsp"],     # include JSPs for Java projects
+            "java": [".java", ".jsp"],
             "kotlin": [".kt"],
             "scala": [".scala"],
             "csharp": [".cs"],
@@ -225,11 +252,11 @@ jobs:
           data2["findings"] = kept
           json.dump(data2, open(outp, "w", encoding="utf-8"), indent=2)
 
-          print(f"Filtered for {lang}: {len(kept)} of {len(findings)} findings")
-          # Emit count as a step output
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as g:
             g.write(f"count={len(kept)}\n")
             g.write(f"file={outp}\n")
+
+          print(f"Filtered for {lang}: {len(kept)} of {len(findings)} findings")
           PY
         env:
           LANG: ${{ matrix.language }}
