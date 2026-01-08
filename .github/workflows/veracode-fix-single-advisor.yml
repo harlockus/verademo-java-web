@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   pipeline_scan_for_single:
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'veracode-single-fix-holder-')
     runs-on: ubuntu-latest
     outputs:
       has_results: ${{ steps.scan_outputs.outputs.has_results }}
