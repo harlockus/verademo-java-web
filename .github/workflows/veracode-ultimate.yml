@@ -57,7 +57,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Pipeline Scan exits non-zero when findings exist. Capture RC but keep going.
           set +e
           java -jar pipeline-scan.jar \
             -vid "${VERACODE_API_ID}" \
@@ -123,150 +122,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download scan outputs
-        uses: actions/download-artifact@v4
-        with:
-          name: veracode-pipeline-scan
-          path: pipeline_out
-
-      - name: Setup Python (matrix builder)
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Build Fix matrix from filtered_results.json (languages + batch-supported CWEs)
+      - name: Build Fix matrix (all Fix-supported languages + batch CWEs)
         id: mk
         run: |
           set -euo pipefail
 
-          python - << 'PY' > matrix.json
-          import json, os
-          from collections import Counter
+          # Supported languages by Fix GitHub Action: java,csharp,javascript,python,kotlin,scala,php,go 
+          # CWEs listed below are "Batch fix" CWEs from About Veracode Fix 
+          cat > matrix.json << 'EOF'
+          {
+            "include": [
+              { "language": "java",       "cwe": "80,89,113,117,159,209,331,404,597,611", "sbp1": "com/:src/main/java/com/", "sbp2": "WEB-INF:src/main/webapp/WEB-INF", "sbp3": "" },
+              { "language": "kotlin",     "cwe": "80,89,113,117,331,404",                 "sbp1": "com/:src/main/java/com/", "sbp2": "",                               "sbp3": "" },
+              { "language": "scala",      "cwe": "78,80,117,611",                         "sbp1": "com/:src/main/java/com/", "sbp2": "",                               "sbp3": "" },
 
-          # GitHub Action supported languages:
-          # java, csharp, javascript, python, kotlin, scala, php, go   [oai_citation:3‡Veracode Docs](https://docs.veracode.com/r/Veracode_Fix_GitHub_Action?utm_source=chatgpt.com)
-          SUPPORTED = {"java","csharp","javascript","python","kotlin","scala","php","go"}
+              { "language": "csharp",     "cwe": "80,89,117,209,316,331,352,404,611",     "sbp1": "src/:src/",               "sbp2": "",                               "sbp3": "" },
 
-          # Batch-supported CWEs per language from "About Veracode Fix" tables.  [oai_citation:4‡Veracode Docs](https://docs.veracode.com/r/About_Veracode_Fix)
-          # IMPORTANT: We include only CWEs with Batch fix support, because this workflow uses fixType: batch.
-          CWES_BATCH = {
-            "csharp":     "80,89,117,209,316,331,352,404,611",
-            "go":         "73,78,117",
-            "java":       "80,89,113,117,159,209,331,404,597,611",
-            "javascript": "80,89,113,117,209,352,601,611,614",
-            "kotlin":     "80,89,113,117,331,404",
-            "php":        "80,89,117",
-            "python":     "78,80,89,295,331,757",
-            "scala":      "78,80,117,611",
+              { "language": "javascript", "cwe": "80,89,113,117,209,352,601,611,614",     "sbp1": "src/:src/",               "sbp2": "",                               "sbp3": "" },
+
+              { "language": "python",     "cwe": "78,80,89,295,331,757",                  "sbp1": "src/:src/",               "sbp2": "app/:app/",                      "sbp3": "" },
+
+              { "language": "php",        "cwe": "80,89,117",                             "sbp1": "src/:src/",               "sbp2": "",                               "sbp3": "" },
+
+              { "language": "go",         "cwe": "73,78,117",                             "sbp1": "src/:src/",               "sbp2": "",                               "sbp3": "" }
+            ]
           }
-
-          EXT_TO_LANG = {
-            ".java": "java",
-            ".kt": "kotlin",
-            ".scala": "scala",
-            ".cs": "csharp",
-            ".js": "javascript",
-            ".ts": "javascript",
-            ".jsx": "javascript",
-            ".tsx": "javascript",
-            ".py": "python",
-            ".php": "php",
-            ".go": "go",
-          }
-
-          def norm(p: str) -> str:
-            return (p or "").replace("\\","/").strip().lstrip("./").lstrip("/")
-
-          def src_path(finding: dict):
-            files = finding.get("files") or {}
-            src = files.get("source_file") or {}
-            p = src.get("file") or src.get("upload_file")
-            return norm(str(p)) if p else None
-
-          def lang_from_path(p: str):
-            pl = p.lower()
-            for ext, lang in EXT_TO_LANG.items():
-              if pl.endswith(ext):
-                return lang
-            return None
-
-          with open("pipeline_out/filtered_results.json","r",encoding="utf-8") as f:
-            data = json.load(f)
-
-          findings = data.get("findings", []) if isinstance(data, dict) else []
-
-          lang_paths = {k: [] for k in SUPPORTED}
-          for x in findings:
-            if not isinstance(x, dict):
-              continue
-            p = src_path(x)
-            if not p:
-              continue
-            lang = lang_from_path(p)
-            if lang in SUPPORTED:
-              lang_paths[lang].append(p)
-
-          include = []
-
-          # Helper: choose a best top-level root for JS/Py/etc based on most common first segment
-          def choose_root(paths, candidates):
-            cnt = Counter()
-            for p in paths:
-              parts = p.split("/")
-              if parts and parts[0] in candidates:
-                cnt[parts[0]] += 1
-            if cnt:
-              return cnt.most_common(1)[0][0]
-            # fallback: pick first existing directory among candidates
-            for d in candidates:
-              if os.path.isdir(d):
-                return d
-            return "src"
-
-          JS_CANDIDATES = ["src","routes","frontend","lib","app","server","client","packages"]
-          PY_CANDIDATES = ["src","app","server","lib"]
-
-          for lang, paths in lang_paths.items():
-            if not paths:
-              continue
-            cwe = CWES_BATCH.get(lang)
-            if not cwe:
-              # if not defined, skip; keeps workflow stable
-              continue
-
-            sbp1 = sbp2 = sbp3 = ""
-
-            if lang in ("java","kotlin","scala"):
-              sbp1 = "com/:src/main/java/com/"
-              sbp2 = "WEB-INF:src/main/webapp/WEB-INF"
-              sbp3 = ""
-            elif lang == "javascript":
-              root = choose_root(paths, JS_CANDIDATES)
-              sbp1 = f"{root}/:{root}/"
-              sbp2 = ""
-              sbp3 = ""
-            elif lang == "python":
-              root = choose_root(paths, PY_CANDIDATES)
-              sbp1 = f"{root}/:{root}/"
-              sbp2 = ""
-              sbp3 = ""
-            else:
-              # go/php/csharp: try "src/" identity mapping
-              sbp1 = "src/:src/"
-              sbp2 = ""
-              sbp3 = ""
-
-            include.append({
-              "language": lang,
-              "cwe": cwe,
-              "sbp1": sbp1,
-              "sbp2": sbp2,
-              "sbp3": sbp3
-            })
-
-          out = {"include": include}
-          print(json.dumps(out))
-          PY
+          EOF
 
           MATRIX="$(cat matrix.json)"
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
@@ -292,18 +173,80 @@ jobs:
           name: veracode-pipeline-scan
           path: pipeline_out
 
-      - name: Verify Fix input exists
+      - name: Setup Python (Fix input filtering)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Filter Fix input to language=${{ matrix.language }}
+        id: filter
         run: |
           set -euo pipefail
-          test -f pipeline_out/filtered_results.json
+          python - << 'PY'
+          import json, os, sys
+
+          lang = os.environ["LANG"]
+          inp = "pipeline_out/filtered_results.json"
+          outp = f"pipeline_out/filtered_results_{lang}.json"
+
+          LANG_EXTS = {
+            "java": [".java", ".jsp"],     # include JSPs for Java projects
+            "kotlin": [".kt"],
+            "scala": [".scala"],
+            "csharp": [".cs"],
+            "javascript": [".js", ".ts", ".jsx", ".tsx"],
+            "python": [".py"],
+            "php": [".php"],
+            "go": [".go"],
+          }
+
+          exts = LANG_EXTS.get(lang, [])
+          if not exts:
+            raise SystemExit(f"No ext mapping for {lang}")
+
+          def norm(p):
+            return (p or "").replace("\\","/").strip()
+
+          def src_path(f):
+            src = ((f.get("files") or {}).get("source_file") or {})
+            return norm(src.get("file") or src.get("upload_file") or "")
+
+          data = json.load(open(inp, "r", encoding="utf-8"))
+          findings = data.get("findings", []) if isinstance(data, dict) else []
+          kept = []
+          for f in findings:
+            if not isinstance(f, dict):
+              continue
+            p = src_path(f).lower()
+            if any(p.endswith(e) for e in exts):
+              kept.append(f)
+
+          data2 = dict(data)
+          data2["findings"] = kept
+          json.dump(data2, open(outp, "w", encoding="utf-8"), indent=2)
+
+          print(f"Filtered for {lang}: {len(kept)} of {len(findings)} findings")
+          # Emit count as a step output
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as g:
+            g.write(f"count={len(kept)}\n")
+            g.write(f"file={outp}\n")
+          PY
+        env:
+          LANG: ${{ matrix.language }}
+
+      - name: Skip Fix when no findings for this language
+        if: steps.filter.outputs.count == '0'
+        run: |
+          echo "No findings for language=${{ matrix.language }}. Skipping Fix."
 
       - name: Run Veracode Fix (Batch → PR) — language=${{ matrix.language }}
+        if: steps.filter.outputs.count != '0'
         continue-on-error: true
         uses: Veracode/veracode-fix@v1.0.4
         with:
           vid: ${{ secrets.VID }}
           vkey: ${{ secrets.VKEY }}
-          inputFile: pipeline_out/filtered_results.json
+          inputFile: ${{ steps.filter.outputs.file }}
           language: ${{ matrix.language }}
           cwe: ${{ matrix.cwe }}
           fixType: batch
