@@ -126,27 +126,48 @@ jobs:
         id: detector
         run: |
           set -euo pipefail
-
           found=()
 
           add_lang () {
             local lang="$1"
-            for x in "${found[@]:-}"; do
-              if [ "$x" = "$lang" ]; then
-                return 0
-              fi
-            done
-            found+=("$lang")
+            local cwe="$2"
+            found+=("{\"language\":\"$lang\",\"cwe\":\"$cwe\"}")
           }
 
-          if find . -type f -name "*.java" -not -path "./.git/*" -print -quit | grep -q .; then add_lang "java"; fi
-          if find . -type f \( -name "*.cs" -o -name "*.csproj" -o -name "*.sln" \) -not -path "./.git/*" -print -quit | grep -q .; then add_lang "csharp"; fi
-          if find . -type f \( -name "*.js" -o -name "*.ts" -o -name "package.json" \) -not -path "./.git/*" -print -quit | grep -q .; then add_lang "javascript"; fi
-          if find . -type f \( -name "*.py" -o -name "requirements.txt" -o -name "pyproject.toml" \) -not -path "./.git/*" -print -quit | grep -q .; then add_lang "python"; fi
-          if find . -type f -name "*.kt" -not -path "./.git/*" -print -quit | grep -q .; then add_lang "kotlin"; fi
-          if find . -type f -name "*.scala" -not -path "./.git/*" -print -quit | grep -q .; then add_lang "scala"; fi
-          if find . -type f \( -name "*.php" -o -name "composer.json" \) -not -path "./.git/*" -print -quit | grep -q .; then add_lang "php"; fi
-          if find . -type f \( -name "*.go" -o -name "go.mod" \) -not -path "./.git/*" -print -quit | grep -q .; then add_lang "go"; fi
+          # CWE sets from Veracode Fix docs/blog (supported CWEs by language).
+          # Source: Veracode Fix GitHub Action + Fix support tables.  [oai_citation:1‡Veracode](https://www.veracode.com/blog/new-in-veracode-fix-additional-language-support-and-batch-fix/?utm_source=chatgpt.com)
+
+          if find . -type f -name "*.java" -not -path "./.git/*" -print -quit | grep -q .; then
+            add_lang "java" "73,80,89,113,117,327,331,382,470,597,601,611"
+          fi
+
+          if find . -type f \( -name "*.cs" -o -name "*.csproj" -o -name "*.sln" \) -not -path "./.git/*" -print -quit | grep -q .; then
+            add_lang "csharp" "80,89,201,209,259,352,404,601,611,798"
+          fi
+
+          if find . -type f \( -name "*.js" -o -name "*.ts" -o -name "package.json" \) -not -path "./.git/*" -print -quit | grep -q .; then
+            add_lang "javascript" "73,78,80,89,113,117,327,611,614"
+          fi
+
+          if find . -type f \( -name "*.py" -o -name "requirements.txt" -o -name "pyproject.toml" \) -not -path "./.git/*" -print -quit | grep -q .; then
+            add_lang "python" "73,78,80,89,295,327,331,757"
+          fi
+
+          if find . -type f -name "*.kt" -not -path "./.git/*" -print -quit | grep -q .; then
+            add_lang "kotlin" "80,89,113,117,331"
+          fi
+
+          if find . -type f -name "*.scala" -not -path "./.git/*" -print -quit | grep -q .; then
+            add_lang "scala" "78,80,89,117,611"
+          fi
+
+          if find . -type f \( -name "*.php" -o -name "composer.json" \) -not -path "./.git/*" -print -quit | grep -q .; then
+            add_lang "php" "73,78,80,89,117"
+          fi
+
+          if find . -type f \( -name "*.go" -o -name "go.mod" \) -not -path "./.git/*" -print -quit | grep -q .; then
+            add_lang "go" "73,78,117"
+          fi
 
           if [ ${#found[@]} -eq 0 ]; then
             echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
@@ -155,22 +176,23 @@ jobs:
           fi
 
           json='{"include":['
-          first=1
-          for lang in "${found[@]}"; do
-            if [ $first -eq 0 ]; then json+=','; fi
-            first=0
-            json+='{"language":"'"$lang"'"}'
+          for i in "${!found[@]}"; do
+            json+="${found[$i]}"
+            if [ "$i" -lt "$((${#found[@]}-1))" ]; then json+=','; fi
           done
           json+=']}'
 
-          echo "Detected Fix languages: ${found[*]}"
           echo "matrix=$json" >> "$GITHUB_OUTPUT"
+          echo "Detected Fix matrix: $json"
 
   veracode_fix_detected:
     needs: [pipeline_scan_and_sarif, detect_fix_languages]
     if: (github.event_name == 'pull_request' || inputs.run_fix == 'true') && needs.detect_fix_languages.outputs.matrix != ''
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+
+    # Make it "go through" — generous cap instead of short cancellation.
+    # You can still manually cancel from the UI if needed.
+    timeout-minutes: 120
 
     strategy:
       fail-fast: false
@@ -202,7 +224,6 @@ jobs:
               break
             fi
           done
-
           if [ -n "$pick" ]; then
             echo "JS_ROOT=$pick" >> "$GITHUB_ENV"
             echo "Detected JS_ROOT=$pick"
@@ -212,6 +233,7 @@ jobs:
           fi
 
       - name: Run Veracode Fix (Batch PR) — language=${{ matrix.language }}
+        # Non-blocking: Fix should not break scan visibility even if it can't fix anything.
         continue-on-error: true
         uses: Veracode/veracode-fix@v1.0.4
         with:
@@ -219,6 +241,7 @@ jobs:
           vkey: ${{ secrets.VKEY }}
           inputFile: pipeline_out/filtered_results.json
           language: ${{ matrix.language }}
+          cwe: ${{ matrix.cwe }}
           fixType: batch
           files: all
           prComment: true
