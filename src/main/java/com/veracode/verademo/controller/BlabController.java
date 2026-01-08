@@ -27,6 +27,8 @@ import com.veracode.verademo.model.Blab;
 import com.veracode.verademo.model.Blabber;
 import com.veracode.verademo.model.Comment;
 import com.veracode.verademo.utils.Constants;
+import org.owasp.encoder.Encode;
+import org.apache.commons.lang3.StringUtils;
 
 @Controller
 @Scope("request")
@@ -467,27 +469,24 @@ public class BlabController {
 		logger.info("User is Logged In - continuing...");
 
 		Connection connect = null;
-		PreparedStatement blabberQuery = null;
-
-		/* START BAD CODE */
-		String blabbersSql = "SELECT users.username," + " users.blab_name," + " users.created_at,"
-				+ " SUM(if(listeners.listener=?, 1, 0)) as listeners,"
-				+ " SUM(if(listeners.status='Active',1,0)) as listening"
-				+ " FROM users LEFT JOIN listeners ON users.username = listeners.blabber"
-				+ " WHERE users.username NOT IN (\"admin\",?)" + " GROUP BY users.username" + " ORDER BY " + sort + ";";
-
-		try {
-			logger.info("Getting Database connection");
-			// Get the Database Connection
-			Class.forName("com.mysql.jdbc.Driver");
-			connect = DriverManager.getConnection(Constants.create().getJdbcConnectionString());
-
-			// Find the Blabbers
-			logger.info(blabbersSql);
-			blabberQuery = connect.prepareStatement(blabbersSql);
-			blabberQuery.setString(1, username);
-			blabberQuery.setString(2, username);
-			ResultSet blabbersResults = blabberQuery.executeQuery();
+PreparedStatement blabberQuery = null;
+String blabbersSql = "SELECT users.username, " + " users.blab_name, " + " users.created_at, "
++ " SUM(if(listeners.listener=?, 1, 0)) as listeners, "
++ " SUM(if(listeners.status='Active', 1, 0)) as listening"
++ " FROM users LEFT JOIN listeners ON users.username = listeners.blabber"
++ " WHERE users.username NOT IN (\"admin\", ?)" + " GROUP BY users.username" + " ORDER BY ?;";
+try {
+    logger.info("Getting Database connection");
+    // Get the Database Connection
+    Class.forName("com.mysql.jdbc.Driver");
+    connect = DriverManager.getConnection(Constants.create().getJdbcConnectionString());
+    // Find the Blabbers
+    logger.info(blabbersSql);
+    blabberQuery = connect.prepareStatement(blabbersSql);
+    blabberQuery.setString(1, username);
+    blabberQuery.setString(2, username);
+    blabberQuery.setString(3, sort);
+    ResultSet blabbersResults = blabberQuery.executeQuery();
 			/* END BAD CODE */
 
 			List<Blabber> blabbers = new ArrayList<Blabber>();
@@ -555,8 +554,8 @@ public class BlabController {
 			return nextView = "redirect:login?target=blabbers";
 		}
 
-		logger.info("blabberUsername = " + blabberUsername);
-		logger.info("command = " + command);
+logger.info("blabberUsername = " + Encode.forJava(blabberUsername));
+logger.info("command = " + StringUtils.normalizeSpace(command));
 
 		Connection connect = null;
 		PreparedStatement action = null;
