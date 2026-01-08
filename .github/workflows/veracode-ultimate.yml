@@ -2,6 +2,11 @@ name: Veracode Ultimate (Pipeline Scan + SARIF + Fix Auto-Detect)
 
 on:
   workflow_dispatch:
+    inputs:
+      run_fix:
+        description: "Run Veracode Fix (may take time)"
+        required: true
+        default: "false"
   pull_request:
     branches: [ main, master ]
 
@@ -162,9 +167,8 @@ jobs:
           echo "matrix=$json" >> "$GITHUB_OUTPUT"
 
   veracode_fix_detected:
-    # Fix only runs on PRs (keeps it fast and avoids long manual hangs)
-    if: github.event_name == 'pull_request' && needs.detect_fix_languages.outputs.matrix != ''
     needs: [pipeline_scan_and_sarif, detect_fix_languages]
+    if: (github.event_name == 'pull_request' || inputs.run_fix == 'true') && needs.detect_fix_languages.outputs.matrix != ''
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
