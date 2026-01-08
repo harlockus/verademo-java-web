@@ -56,7 +56,6 @@ jobs:
           VERACODE_API_KEY: ${{ secrets.VERACODE_API_KEY }}
         run: |
           set -euo pipefail
-
           set +e
           java -jar pipeline-scan.jar \
             -vid "${VERACODE_API_ID}" \
@@ -130,8 +129,6 @@ jobs:
           python - << 'PY'
           import json
 
-          # Fix GitHub Action supported languages: java,csharp,javascript,python,kotlin,scala,php,go
-          # CWEs below are batch-fix CWEs from "About Veracode Fix" (since we run fixType=batch).
           matrix = {
             "include": [
               {"language":"java","cwe":"80,89,113,117,159,209,331,404,597,611","sbp1":"com/:src/main/java/com/","sbp2":"WEB-INF:src/main/webapp/WEB-INF","sbp3":""},
@@ -141,17 +138,16 @@ jobs:
               {"language":"javascript","cwe":"80,89,113,117,209,352,601,611,614","sbp1":"src/:src/","sbp2":"","sbp3":""},
               {"language":"python","cwe":"78,80,89,295,331,757","sbp1":"src/:src/","sbp2":"app/:app/","sbp3":""},
               {"language":"php","cwe":"80,89,117","sbp1":"src/:src/","sbp2":"","sbp3":""},
-              {"language":"go","cwe":"73,78,117","sbp1":"src/:src/","sbp2":"","sbp3":""},
+              {"language":"go","cwe":"73,78,117","sbp1":"src/:src/","sbp2":"","sbp3":""}
             ]
           }
 
-          # IMPORTANT: output must be a single line for GitHub outputs
+          # Single-line JSON for GitHub output
           print(json.dumps(matrix, separators=(",", ":")))
           PY
         shell: bash
 
       - name: Set matrix output
-        id: setout
         run: |
           set -euo pipefail
           MATRIX="$(python - << 'PY'
@@ -165,19 +161,12 @@ jobs:
               {"language":"javascript","cwe":"80,89,113,117,209,352,601,611,614","sbp1":"src/:src/","sbp2":"","sbp3":""},
               {"language":"python","cwe":"78,80,89,295,331,757","sbp1":"src/:src/","sbp2":"app/:app/","sbp3":""},
               {"language":"php","cwe":"80,89,117","sbp1":"src/:src/","sbp2":"","sbp3":""},
-              {"language":"go","cwe":"73,78,117","sbp1":"src/:src/","sbp2":"","sbp3":""},
+              {"language":"go","cwe":"73,78,117","sbp1":"src/:src/","sbp2":"","sbp3":""}
             ]
           }
           print(json.dumps(matrix, separators=(",", ":")))
           PY)"
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-        shell: bash
-
-      - name: Expose matrix output
-        id: mk
-        run: |
-          # Reuse the output from previous step
-          echo "matrix=${{ steps.setout.outputs.matrix }}" >> "$GITHUB_OUTPUT"
         shell: bash
 
   veracode_fix_universal:
