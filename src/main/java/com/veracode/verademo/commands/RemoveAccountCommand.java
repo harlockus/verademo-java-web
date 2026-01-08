@@ -8,6 +8,7 @@ import java.sql.Statement;
 
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
+import org.apache.commons.lang3.StringUtils;
 
 public class RemoveAccountCommand implements BlabberCommand {
 	private static final Logger logger = LogManager.getLogger("VeraDemo:RemoveAccountCommand");
@@ -35,20 +36,27 @@ public class RemoveAccountCommand implements BlabberCommand {
 			action.execute();
 
 			sqlQuery = "SELECT blab_name FROM users WHERE username = '" + blabberUsername +"'";
-			Statement sqlStatement = connect.createStatement();
-			logger.info(sqlQuery);
-			ResultSet result = sqlStatement.executeQuery(sqlQuery);
+sqlQuery = "SELECT blab_name FROM users WHERE username = ?";
+PreparedStatement sqlStatement = connect.prepareStatement(sqlQuery);
+sqlStatement.setString(1, blabberUsername);
+logger.info(sqlQuery);
+ResultSet result = sqlStatement.executeQuery();
 			result.next();
 			
 			/* START BAD CODE ------*/
-			String event = "Removed account for blabber " + result.getString(1);
-			sqlQuery = "INSERT INTO users_history (blabber, event) VALUES ('" + blabberUsername + "', '" + event + "')";
-			logger.info(sqlQuery);
-			sqlStatement.execute(sqlQuery);
+String event = "Removed account for blabber " + result.getString(1);
+    sqlQuery = "INSERT INTO users_history (blabber, event) VALUES (?, ?)";
+    PreparedStatement sqlStatement2 = connect.prepareStatement(sqlQuery);
+    sqlStatement2.setString(1, blabberUsername);
+    sqlStatement2.setString(2, event);
+    logger.info(sqlQuery);
+    sqlStatement2.execute();
 			
 			sqlQuery = "DELETE FROM users WHERE username = '" + blabberUsername + "'";
-			logger.info(sqlQuery);
-			sqlStatement.execute(sqlQuery);
+			logger.info(StringUtils.normalizeSpace(sqlQuery));
+PreparedStatement sqlStatement2 = connect.prepareStatement("DELETE FROM users WHERE username = ?");
+sqlStatement2.setString(1, blabberUsername);
+sqlStatement2.execute();
 			/* END BAD CODE */
 			
 		} catch (SQLException e) {
