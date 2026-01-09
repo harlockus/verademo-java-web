@@ -27,6 +27,8 @@ import com.veracode.verademo.model.Blab;
 import com.veracode.verademo.model.Blabber;
 import com.veracode.verademo.model.Comment;
 import com.veracode.verademo.utils.Constants;
+import org.owasp.encoder.Encode;
+import org.apache.commons.lang3.StringUtils;
 
 @Controller
 @Scope("request")
@@ -555,8 +557,8 @@ public class BlabController {
 			return nextView = "redirect:login?target=blabbers";
 		}
 
-		logger.info("blabberUsername = " + blabberUsername);
-		logger.info("command = " + command);
+logger.info("blabberUsername = " + Encode.forJava(blabberUsername));
+logger.info("command = " + StringUtils.normalizeSpace(command));
 
 		Connection connect = null;
 		PreparedStatement action = null;
