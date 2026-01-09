@@ -1,14 +1,14 @@
 name: Veracode Ultimate (Pipeline Scan + SARIF + Batch Fix)
 
 on:
+  pull_request:
+    branches: [ main, master ]
   workflow_dispatch:
     inputs:
       run_fix:
-        description: "Run Veracode Fix (batch PR) after scan"
+        description: "Run Veracode Fix batch after scan (creates PR when not in PR event)"
         required: true
         default: "true"
-  pull_request:
-    branches: [ main, master ]
 
 permissions:
   contents: write
@@ -16,9 +16,12 @@ permissions:
   actions: read
   security-events: write
 
+concurrency:
+  group: veracode-ultimate-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   pipeline_scan_and_sarif:
-    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'veracode-single-fix-holder-')
     runs-on: ubuntu-latest
     outputs:
       has_results: ${{ steps.scan_outputs.outputs.has_results }}
@@ -35,9 +38,12 @@ jobs:
           Findings without a resolvable repo file+line are anchored here.
           EOF
 
-      - name: Create source zip (exclude node_modules)
+      - name: Create source zip (exclude node_modules / .git)
         run: |
-          zip -r pipeline-src.zip . -x "**/node_modules/**" -x "**/.git/**"
+          zip -r pipeline-src.zip . \
+            -x "**/node_modules/**" \
+            -x "**/.git/**" \
+            -x "**/.veracode/**"
 
       - name: Set up Java (Pipeline Scan tool)
         uses: actions/setup-java@v4
@@ -53,8 +59,8 @@ jobs:
       - name: Run Pipeline Scan (ESD enabled, do not fail job on findings)
         id: scan_outputs
         env:
-          VERACODE_API_ID: ${{ secrets.VERACODE_API_ID }}
-          VERACODE_API_KEY: ${{ secrets.VERACODE_API_KEY }}
+          VERACODE_API_ID: ${{ secrets.VID }}
+          VERACODE_API_KEY: ${{ secrets.VKEY }}
         run: |
           set -euo pipefail
 
@@ -101,12 +107,13 @@ jobs:
           category: veracode-pipeline
           wait-for-processing: true
 
-      - name: Telemetry — summarize pipeline findings (baseline + batch-fixable-by-language)
+      - name: Telemetry — summarize pipeline findings (overall + batch-fixable-by-language)
         run: |
           python - << 'PY'
           import json
           from collections import Counter
 
+          # Batch-fix CWE allow lists per language (batch mode)
           ALLOW = {
             "java":       {"80","89","113","117","159","209","331","404","597","611"},
             "kotlin":     {"80","89","113","117","331","404"},
@@ -131,19 +138,9 @@ jobs:
 
           def norm(p): return (p or "").replace("\\","/").strip()
 
-          def canonicalize_path(p: str) -> str:
-            # UNIVERSAL normalization to prevent Fix double-prefix issues on JVM repos
-            p = norm(p).lstrip("./").lstrip("/")
-            if p.startswith("src/main/java/"):
-              p = p[len("src/main/java/"):]
-            if p.startswith("src/main/webapp/"):
-              p = p[len("src/main/webapp/"):]
-            return p
-
           def src_path(f):
             src = ((f.get("files") or {}).get("source_file") or {})
-            raw = src.get("file") or src.get("upload_file") or ""
-            return canonicalize_path(raw)
+            return norm(src.get("file") or src.get("upload_file") or "")
 
           data = json.load(open("filtered_results.json","r",encoding="utf-8"))
           findings = data.get("findings", []) if isinstance(data, dict) else []
@@ -157,6 +154,7 @@ jobs:
           for f in findings:
             if not isinstance(f, dict):
               continue
+
             sev[str(f.get("severity","UNKNOWN"))] += 1
             cid = str(f.get("cwe_id") or "").strip()
             if cid:
@@ -164,19 +162,19 @@ jobs:
 
             p = src_path(f).lower()
             lang = None
-            for e,l in EXT_TO_LANG.items():
+            for e, l in EXT_TO_LANG.items():
               if p.endswith(e):
                 lang = l
                 ext[e] += 1
                 break
 
-            if lang and cid and cid in ALLOW.get(lang,set()):
+            if lang and cid and cid in ALLOW.get(lang, set()):
               batch_fixable_by_lang[lang] += 1
 
           out = {
             "total_findings": total,
             "severity_counts": dict(sev),
-            "top_cwes": dict(cwe.most_common(15)),
+            "top_cwes": dict(cwe.most_common(20)),
             "file_extension_counts": dict(ext),
             "batch_fixable_findings_by_language": dict(batch_fixable_by_lang),
           }
@@ -208,6 +206,9 @@ jobs:
       matrix: ${{ steps.mk.outputs.matrix }}
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download scan outputs
         uses: actions/download-artifact@v4
         with:
@@ -219,13 +220,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Build Fix matrix dynamically from findings (only batch-fixable) + JS root hardening + JVM canonicalization
+      - name: Build Fix matrix dynamically from findings (only batch-fixable)
         id: mk
         run: |
           python - << 'PY'
           import json, os
           from collections import Counter
 
+          # Batch-fix CWE allow lists per language (batch mode)
           ALLOW = {
             "java":       {"80","89","113","117","159","209","331","404","597","611"},
             "kotlin":     {"80","89","113","117","331","404"},
@@ -253,19 +255,9 @@ jobs:
           def norm(p: str) -> str:
             return (p or "").replace("\\","/").strip()
 
-          def canonicalize_path(p: str) -> str:
-            p = norm(p).lstrip("./").lstrip("/")
-            # JVM normalization to avoid double-prefix rewrites
-            if p.startswith("src/main/java/"):
-              p = p[len("src/main/java/"):]
-            if p.startswith("src/main/webapp/"):
-              p = p[len("src/main/webapp/"):]
-            return p
-
           def src_path(f: dict) -> str:
             src = ((f.get("files") or {}).get("source_file") or {})
-            raw = src.get("file") or src.get("upload_file") or ""
-            return canonicalize_path(raw)
+            return norm(src.get("file") or src.get("upload_file") or "")
 
           data = json.load(open("pipeline_out/filtered_results.json","r",encoding="utf-8"))
           findings = data.get("findings", []) if isinstance(data, dict) else []
@@ -277,6 +269,9 @@ jobs:
             if not isinstance(f, dict):
               continue
             p = src_path(f).lower()
+            if not p or p == "unknown":
+              continue
+
             lang = None
             for ext, l in EXT_TO_LANG.items():
               if p.endswith(ext):
@@ -294,37 +289,41 @@ jobs:
               if parts and parts[0] and parts[0] not in IGNORE_ROOTS:
                 js_root_counts[parts[0]] += 1
 
-          # JS/TS: derive top 3 roots from findings (no os.path.isdir)
+          def mk_map(frm: str, to: str) -> str:
+            # Veracode format "FROM:TO"
+            return f"{frm}:{to}"
+
+          # IMPORTANT: Java mapping must handle BOTH:
+          # - com/...  (from scan)  -> src/main/java/com/...
+          # - src/main/java/... already repo-relative -> identity (prevents double-prefix)
+          JAVA_SBP = (
+            mk_map("src/main/java/", "src/main/java/"),          # identity
+            mk_map("com/", "src/main/java/com/"),                # for com/...
+            mk_map("WEB-INF", "src/main/webapp/WEB-INF"),        # for WEB-INF/...
+          )
+
+          # JS: pick up to 3 top roots from findings; ensure at least one
           js_roots = [r for r,_ in js_root_counts.most_common(3)]
           if not js_roots:
             js_roots = ["src"]
 
-          def mk_map(a: str, b: str) -> str:
-            return f"{a}:{b}"
-
-          def java_maps():
-            # Use your proven mapping style
-            return (
-              mk_map("com/","src/main/java/com/"),
-              mk_map("WEB-INF","src/main/webapp/WEB-INF"),
-              mk_map("com/","src/main/java/com/"),
-            )
+          JS_SBP = []
+          for r in js_roots[:3]:
+            JS_SBP.append(mk_map(f"{r}/", f"{r}/"))             # identity for repo-relative roots
+          while len(JS_SBP) < 3:
+            JS_SBP.append(JS_SBP[0])
+          JS_SBP = tuple(JS_SBP[:3])
 
           BASE = {
-            "java":   java_maps(),
-            "kotlin": (mk_map("com/","src/main/java/com/"), mk_map("com/","src/main/java/com/"), mk_map("com/","src/main/java/com/")),
-            "scala":  (mk_map("com/","src/main/java/com/"), mk_map("com/","src/main/java/com/"), mk_map("com/","src/main/java/com/")),
-            "csharp": (mk_map("src/","src/"), mk_map("src/","src/"), mk_map("src/","src/")),
-            "python": (mk_map("src/","src/"), mk_map("app/","app/"), mk_map("src/","src/")),
-            "php":    (mk_map("src/","src/"), mk_map("src/","src/"), mk_map("src/","src/")),
-            "go":     (mk_map("src/","src/"), mk_map("src/","src/"), mk_map("src/","src/")),
+            "java": JAVA_SBP,
+            "kotlin": (mk_map("src/main/kotlin/", "src/main/kotlin/"), mk_map("com/", "src/main/kotlin/com/"), mk_map("src/main/java/", "src/main/java/")),
+            "scala":  (mk_map("src/main/scala/", "src/main/scala/"),   mk_map("com/", "src/main/scala/com/"),  mk_map("src/main/java/", "src/main/java/")),
+            "csharp": (mk_map("src/", "src/"), mk_map("", ""), mk_map("", "")),
+            "javascript": JS_SBP,
+            "python": (mk_map("src/", "src/"), mk_map("app/", "app/"), mk_map("", "")),
+            "php":    (mk_map("src/", "src/"), mk_map("", ""), mk_map("", "")),
+            "go":     (mk_map("", ""), mk_map("", ""), mk_map("", "")),
           }
-
-          # JS: top 3 roots; always supply 3 mappings (never empty)
-          js_maps = [mk_map(f"{r}/", f"{r}/") for r in js_roots[:3]]
-          while len(js_maps) < 3:
-            js_maps.append(js_maps[0])
-          BASE["javascript"] = tuple(js_maps[:3])
 
           include = []
           for lang, count in lang_fixable_counts.items():
@@ -335,8 +334,9 @@ jobs:
             include.append({"language": lang, "cwe": cwe_list, "sbp1": sbp1, "sbp2": sbp2, "sbp3": sbp3})
 
           include = sorted(include, key=lambda x: x["language"])
-
           matrix = {"include": include}
+
+          # Always write a valid JSON matrix, even if empty
           matrix_str = json.dumps(matrix, separators=(",", ":"))
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
             out.write(f"matrix={matrix_str}\n")
@@ -360,7 +360,10 @@ jobs:
 
   veracode_fix_universal:
     needs: [pipeline_scan_and_sarif, build_fix_matrix]
-    if: (github.event_name == 'pull_request' || inputs.run_fix == 'true') && needs.build_fix_matrix.outputs.matrix != '' && needs.build_fix_matrix.outputs.matrix != '{"include":[]}'
+    if: >
+      (github.event_name == 'pull_request' || inputs.run_fix == 'true')
+      && needs.build_fix_matrix.outputs.matrix != ''
+      && needs.build_fix_matrix.outputs.matrix != '{"include":[]}'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -383,7 +386,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Filter Fix input to language=${{ matrix.language }} and allowed CWEs only (with JVM canonicalization + dedupe)
+      - name: Filter Fix input to language=${{ matrix.language }} and allowed CWEs only
         id: filter
         run: |
           set -euo pipefail
@@ -392,6 +395,7 @@ jobs:
 
           lang = os.environ["LANG"]
           allow = set(os.environ["ALLOW_CWES"].split(",")) if os.environ.get("ALLOW_CWES") else set()
+
           inp = "pipeline_out/filtered_results.json"
           outp = f"pipeline_out/filtered_results_{lang}.json"
 
@@ -412,19 +416,9 @@ jobs:
 
           def norm(p): return (p or "").replace("\\","/").strip()
 
-          def canonicalize_path(p: str) -> str:
-            # Prevent double-prefix issues for JVM repos
-            p = norm(p).lstrip("./").lstrip("/")
-            if p.startswith("src/main/java/"):
-              p = p[len("src/main/java/"):]
-            if p.startswith("src/main/webapp/"):
-              p = p[len("src/main/webapp/"):]
-            return p
-
           def src_path(f):
             src = ((f.get("files") or {}).get("source_file") or {})
-            raw = src.get("file") or src.get("upload_file") or ""
-            return canonicalize_path(raw)
+            return norm(src.get("file") or src.get("upload_file") or "")
 
           data = json.load(open(inp, "r", encoding="utf-8"))
           findings = data.get("findings", []) if isinstance(data, dict) else []
@@ -433,32 +427,16 @@ jobs:
           for f in findings:
             if not isinstance(f, dict):
               continue
-            p = src_path(f).lower()
-            if not any(p.endswith(e) for e in exts):
+            p = src_path(f)
+            if not p or p.lower() == "unknown":
+              continue
+            pl = p.lower()
+            if not any(pl.endswith(e) for e in exts):
               continue
             cwe = str(f.get("cwe_id") or "").strip()
             if allow and cwe not in allow:
               continue
-
-            # write canonical path back so Fix sees only one style
-            if "files" in f and "source_file" in (f.get("files") or {}):
-              f["files"]["source_file"]["file"] = src_path(f)
-
             kept.append(f)
-
-          # Dedupe: same (path,line,cwe) often appears twice in mixed repos
-          seen = set()
-          deduped = []
-          for f in kept:
-            p = src_path(f).lower()
-            line = str(((f.get("files") or {}).get("source_file") or {}).get("line") or f.get("source_file_line") or "")
-            cwe = str(f.get("cwe_id") or "").strip()
-            key = (p, line, cwe)
-            if key in seen:
-              continue
-            seen.add(key)
-            deduped.append(f)
-          kept = deduped
 
           data2 = dict(data)
           data2["findings"] = kept
@@ -512,7 +490,7 @@ jobs:
           cwe: ${{ matrix.cwe }}
           fixType: batch
           files: all
-          prComment: true
+          prComment: ${{ github.event_name == 'pull_request' }}
           createPR: true
           source_base_path_1: ${{ matrix.sbp1 }}
           source_base_path_2: ${{ matrix.sbp2 }}
