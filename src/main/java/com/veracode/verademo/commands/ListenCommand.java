@@ -34,17 +34,22 @@ public class ListenCommand implements BlabberCommand {
 			action.setString(2, username);
 			action.execute();
 
-			sqlQuery = "SELECT blab_name FROM users WHERE username = '" + blabberUsername + "'";
 			Statement sqlStatement = connect.createStatement();
-			logger.info(sqlQuery);
-			ResultSet result = sqlStatement.executeQuery(sqlQuery);
+sqlQuery = "SELECT blab_name FROM users WHERE username = ?";
+PreparedStatement sqlStatement2 = connect.prepareStatement(sqlQuery);
+sqlStatement2.setString(1, blabberUsername);
+logger.info(sqlQuery);
+ResultSet result = sqlStatement2.executeQuery();
 			result.next();
 			
 			/* START BAD CODE -----*/
-			String event = username + " started listening to " + blabberUsername + "(" + result.getString(1) + ")";
-			sqlQuery = "INSERT INTO users_history (blabber, event) VALUES (\"" + username + "\", \"" + event + "\")";
-			logger.info(sqlQuery);
-			sqlStatement.execute(sqlQuery);
+String event = username + " started listening to " + blabberUsername + "(" + result.getString(1) + ")";
+sqlQuery = "INSERT INTO users_history (blabber, event) VALUES (?, ?)";
+PreparedStatement sqlStatement2 = connect.prepareStatement(sqlQuery);
+sqlStatement2.setString(1, username);
+sqlStatement2.setString(2, event);
+logger.info(sqlQuery);
+sqlStatement2.execute();
 			/* END BAD CODE */
 		} catch (SQLException e) {
 			// TODO Auto-generated catch block
