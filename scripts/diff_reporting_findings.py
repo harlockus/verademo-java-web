@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 Veracode Findings Delta reporter (refactored for readability & lower cyclomatic complexity).
