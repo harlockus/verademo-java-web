@@ -177,6 +177,8 @@ def generate_findings_report(
     if last_updated_end is not None:
         base = {"report_type": "FINDINGS", "last_updated_start_date": last_updated_start, "last_updated_end_date": last_updated_end}
 
+    print(f"Base: {base}")
+
     variants: List[Dict[str, Any]] = [
         {**base, **_maybe({"app_id": app_id, "policy_sandbox": policy_sandbox, "sandbox_id": sandbox_id})},
         {**base, **_maybe({"app_id": app_id, "policy_sandbox": policy_sandbox})},
@@ -185,6 +187,7 @@ def generate_findings_report(
 
     last_body: Dict[str, Any] = {}
     for payload in variants:
+        print(f"Payload: {payload}")
         status, body = post_json(url, auth, payload)
         if status < 400:
             return body
