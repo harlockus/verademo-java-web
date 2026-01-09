@@ -15,6 +15,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
+import java.net.URLEncoder;
 
 public class UserFactory {
 	private static final String COOKIE_NAME = "user";
@@ -93,7 +94,7 @@ public class UserFactory {
 			e.printStackTrace();
 		}
 
-		response.addCookie(new Cookie(COOKIE_NAME, new String(Base64.getEncoder().encode(out.toByteArray()))));
+		response.addCookie(new Cookie(COOKIE_NAME, URLEncoder.encode(new String(Base64.getEncoder().encode(out.toByteArray())), "UTF-8")));
 
 		return response;
 	}

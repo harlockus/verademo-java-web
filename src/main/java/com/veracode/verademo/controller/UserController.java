@@ -50,6 +50,10 @@ import com.veracode.verademo.model.Blabber;
 import com.veracode.verademo.utils.Constants;
 import com.veracode.verademo.utils.User;
 import com.veracode.verademo.utils.UserFactory;
+import org.apache.commons.lang3.StringUtils;
+import java.net.URLEncoder;
+import org.owasp.encoder.Encode;
+import org.apache.commons.text.StringEscapeUtils;
 
 /**
  * @author johnadmin
@@ -170,7 +174,7 @@ public class UserController {
 			if (result.first()) {
 				logger.info("User Found.");
 				// Remember the username as a courtesy.
-				response.addCookie(new Cookie("username", username));
+				response.addCookie(new Cookie("username", URLEncoder.encode(username, Charset.defaultCharset())));
 
 				// If the user wants us to auto-login, store the user details as a cookie.
 				if (remember != null) {
@@ -226,7 +230,7 @@ public class UserController {
 		}
 
 		// Redirect to the appropriate place based on login actions above
-		logger.info("Redirecting to view: " + nextView);
+logger.info("Redirecting to view: " + StringUtils.normalizeSpace(nextView));
 		return nextView;
 	}
 
@@ -234,7 +238,7 @@ public class UserController {
 	@ResponseBody
 	public String showPasswordHint(String username)
 	{
-		logger.info("Entering password-hint with username: " + username);
+		logger.info("Entering password-hint with username: " + StringEscapeUtils.escapeJava(username));
 
 		if (username == null || username.isEmpty()) {
 			return "No username provided, please type in your username first";
@@ -246,13 +250,13 @@ public class UserController {
 			Connection connect = DriverManager.getConnection(Constants.create().getJdbcConnectionString());
 
 			String sql = "SELECT password_hint FROM users WHERE username = '" + username + "'";
-			logger.info(sql);
+			logger.info(StringUtils.normalizeSpace(sql));
 			Statement statement = connect.createStatement();
 			ResultSet result = statement.executeQuery(sql);
 			if (result.first()) {
 				String password= result.getString("password_hint");
 				String formatString = "Username '" + username + "' has password: %.2s%s";
-				logger.info(formatString);
+				logger.info(StringUtils.normalizeSpace(formatString));
 				return String.format(
 						formatString,
 						password,
@@ -260,7 +264,7 @@ public class UserController {
 				);
 			}
 			else {
-				return "No password found for " + username;
+				return "No password found for " + Encode.forHtml(username);
 			}
 		} catch (ClassNotFoundException e) {
 			e.printStackTrace();
@@ -382,7 +386,7 @@ public class UserController {
 
 			sqlStatement = connect.createStatement();
 			sqlStatement.execute(query.toString());
-			logger.info(query.toString());
+logger.info(StringUtils.normalizeSpace(query.toString()));
 			/* END BAD CODE */
 
 			emailUser(username);
@@ -490,7 +494,7 @@ public class UserController {
 			/* START BAD CODE */
 			String sqlMyEvents = "select event from users_history where blabber=\"" + username
 					+ "\" ORDER BY eventid DESC; ";
-			logger.info(sqlMyEvents);
+			logger.info(StringUtils.normalizeSpace(sqlMyEvents));
 			Statement sqlStatement = connect.createStatement();
 			ResultSet userHistoryResult = sqlStatement.executeQuery(sqlMyEvents);
 			/* END BAD CODE */
@@ -628,7 +632,7 @@ public class UserController {
 			for (Cookie cookie : request.getCookies()) {
 				if (cookie.getName().equals("username")) {
 					cookie.setValue(username);
-					response.addCookie(cookie);
+					response.addCookie(URLEncoder.encode(cookie, "UTF-8"));
 				}
 			}
 
@@ -655,7 +659,7 @@ public class UserController {
 				String extension = file.getOriginalFilename().substring(file.getOriginalFilename().lastIndexOf("."));
 				String path = imageDir + username + extension;
 
-				logger.info("Saving new profile image: " + path);
+logger.info("Saving new profile image: " + StringUtils.normalizeSpace(path));
 
 				file.transferTo(new File(path)); // will delete any existing file first
 			}
@@ -691,7 +695,7 @@ public class UserController {
 
 		String path = context.getRealPath("/resources/images") + File.separator + imageName;
 
-		logger.info("Fetching profile image: " + path);
+		logger.info("Fetching profile image: " + StringUtils.normalizeSpace(path));
 
 		InputStream inputStream = null;
 		OutputStream outStream = null;
@@ -705,12 +709,12 @@ public class UserController {
 				// set to binary type if MIME mapping not found
 				mimeType = "application/octet-stream";
 			}
-			logger.info("MIME type: " + mimeType);
+logger.info("MIME type: " + StringUtils.normalizeSpace(mimeType));
 
 			// Set content attributes for the response
-			response.setContentType(mimeType);
+			response.setContentType(URLEncoder.encode(mimeType, Charset.defaultCharset()));
 			response.setContentLength((int) downloadFile.length());
-			response.setHeader("Content-Disposition", "attachment; filename=" + imageName);
+			response.setHeader("Content-Disposition", "attachment; filename=" + URLEncoder.encode(imageName, Charset.defaultCharset()));
 
 			// get output stream of the response
 			outStream = response.getOutputStream();
@@ -800,7 +804,7 @@ public class UserController {
 			}
 		}
 
-		logger.info("Username: " + username + " already exists. Try again.");
+		logger.info("Username: " + StringUtils.normalizeSpace(username) + " already exists. Try again.");
 		return true;
 	}
 
@@ -856,7 +860,7 @@ public class UserController {
 			if (oldImage != null) {
 				String extension = oldImage.substring(oldImage.lastIndexOf("."));
 
-				logger.info("Renaming profile image from " + oldImage + " to " + newUsername + extension);
+logger.info("Renaming profile image from " + Encode.forJava(oldImage) + " to " + newUsername + extension);
 				String path = context.getRealPath("/resources/images") + File.separator;
 
 				File oldName = new File(path + oldImage);
