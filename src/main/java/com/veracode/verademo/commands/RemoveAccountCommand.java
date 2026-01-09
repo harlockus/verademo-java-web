@@ -34,10 +34,12 @@ public class RemoveAccountCommand implements BlabberCommand {
 			action.setString(2, blabberUsername);
 			action.execute();
 
-			sqlQuery = "SELECT blab_name FROM users WHERE username = '" + blabberUsername +"'";
 			Statement sqlStatement = connect.createStatement();
-			logger.info(sqlQuery);
-			ResultSet result = sqlStatement.executeQuery(sqlQuery);
+sqlQuery = "SELECT blab_name FROM users WHERE username = ?";
+PreparedStatement sqlStatement2 = connect.prepareStatement(sqlQuery);
+sqlStatement2.setString(1, blabberUsername);
+logger.info(sqlQuery);
+ResultSet result = sqlStatement2.executeQuery();
 			result.next();
 			
 			/* START BAD CODE ------*/
@@ -48,7 +50,9 @@ public class RemoveAccountCommand implements BlabberCommand {
 			
 			sqlQuery = "DELETE FROM users WHERE username = '" + blabberUsername + "'";
 			logger.info(sqlQuery);
-			sqlStatement.execute(sqlQuery);
+PreparedStatement sqlStatement2 = connect.prepareStatement("DELETE FROM users WHERE username = ?");
+sqlStatement2.setString(1, blabberUsername);
+sqlStatement2.execute();
 			/* END BAD CODE */
 			
 		} catch (SQLException e) {
