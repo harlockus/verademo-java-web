@@ -158,6 +158,7 @@ def generate_findings_report(
     api_base: str,
     auth: RequestsAuthPluginVeracodeHMAC,
     last_updated_start: str,
+    last_updated_end: Optional[str],
     app_id: Optional[int],
     policy_sandbox: Optional[str],
     sandbox_id: Optional[int],
@@ -172,7 +173,9 @@ def generate_findings_report(
 
     base = {"report_type": "FINDINGS", "last_updated_start_date": last_updated_start}
     variants: List[Dict[str, Any]] = [
+        {**base, **_maybe({"app_id": app_id, "policy_sandbox": policy_sandbox, "sandbox_id": sandbox_id, "last_updated_end_date": last_updated_end})},
         {**base, **_maybe({"app_id": app_id, "policy_sandbox": policy_sandbox, "sandbox_id": sandbox_id})},
+        {**base, **_maybe({"app_id": app_id, "policy_sandbox": policy_sandbox, "last_updated_end_date": last_updated_end})},
         {**base, **_maybe({"app_id": app_id, "policy_sandbox": policy_sandbox})},
         base,
     ]
@@ -435,6 +438,7 @@ def main() -> None:
         api_base=api_base,
         auth=auth,
         last_updated_start=last_updated_start,
+        last_updated_end=last_updated_end,
         app_id=app_id,
         policy_sandbox=policy_sandbox,
         sandbox_id=sandbox_id,
