@@ -11,6 +11,8 @@ import os
 import re
 import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from datetime import date
+import calendar
 
 import requests
 import pandas as pd
@@ -40,10 +42,10 @@ def opt_env(name: str) -> str:
     return os.getenv(name, "").strip()
 
 
-def validate_date_yyyy_mm_dd(s: str) -> None:
+def validate_date_yyyy_mm_dd(s: str, start_or_end: str) -> None:
     """Validate YYYY-MM-DD date-only format."""
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
-        raise SystemExit("LAST_UPDATED_START_DATE must be YYYY-MM-DD (date only), e.g. 2025-12-01")
+        raise SystemExit(f"LAST_UPDATED_{start_or_end}_DATE must be YYYY-MM-DD (date only), e.g. 2025-12-01")
 
 
 def ensure_out_dir() -> None:
@@ -346,6 +348,49 @@ def _first_int(obj: Dict[str, Any], keys: List[str]) -> Optional[int]:
             return iv
     return None
 
+def within_six_months(date_str1: str, date_str2: str) -> bool:
+    """
+    Return True if two dates (YYYY-MM-DD strings) are within 6 calendar months
+    of each other (inclusive), otherwise False.
+
+    Definition used:
+    - Take the earlier of the two dates and add exactly 6 calendar months.
+    - If the later date is <= (earlier date + 6 months), return True.
+
+    Examples:
+        within_six_months("2024-01-31", "2024-07-31") -> True   # exactly 6 months
+        within_six_months("2024-01-31", "2024-08-01") -> False  # beyond 6 months
+        within_six_months("2024-08-31", "2025-02-28") -> True   # end-of-month handling
+    """
+    def parse_yyyy_mm_dd(s: str) -> date:
+        y, m, d = map(int, s.split("-"))
+        return date(y, m, d)
+
+    def add_months(dt: date, months: int) -> date:
+        """
+        Add 'months' calendar months to a date, clamping the day to the last valid
+        day of the target month (e.g., Jan 31 + 1 month -> Feb 28 or Feb 29 in leap years).
+        """
+        y = dt.year
+        m = dt.month + months
+        # Normalize year/month
+        y += (m - 1) // 12
+        m = ((m - 1) % 12) + 1
+
+        # Clamp day to month's last day
+        last_day = calendar.monthrange(y, m)[1]
+        d = min(dt.day, last_day)
+        return date(y, m, d)
+
+    d1 = parse_yyyy_mm_dd(date_str1)
+    d2 = parse_yyyy_mm_dd(date_str2)
+
+    # Order: earlier, later
+    earlier, later = (d1, d2) if d1 <= d2 else (d2, d1)
+    six_months_after_earlier = add_months(earlier, 6)
+
+    return later <= six_months_after_earlier
+
 # -----------------------
 # Main
 # -----------------------
@@ -355,7 +400,13 @@ def main() -> None:
     api_base = must_env("VERACODE_API_BASE").rstrip("/")
     app_name = must_env("APPLICATION_NAME")
     last_updated_start = must_env("LAST_UPDATED_START_DATE")
-    validate_date_yyyy_mm_dd(last_updated_start)
+    validate_date_yyyy_mm_dd(last_updated_start, "START")
+
+    last_updated_end = opt_env("LAST_UPDATED_END_DATE")
+    validate_date_yyyy_mm_dd(last_updated_end, "END")
+
+    if not within_six_months(last_updated_start, last_updated_end):
+        raise SystemExit("Start and end dates must be within 6 months of each other")
 
     sandbox_name = opt_env("SANDBOX_NAME")
     auth = hmac_auth_from_env()
