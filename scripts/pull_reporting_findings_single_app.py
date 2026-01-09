@@ -168,14 +168,17 @@ def generate_findings_report(
 
     Try (app_id + policy_sandbox + sandbox_id) → (app_id + policy_sandbox) → (last_updated only)
     Stop at the first successful (status < 400) submission.
+    Note: if last_updated_end date is not empty, then it must be used
     """
     url = f"{api_base}/appsec/v1/analytics/report"
 
     base = {"report_type": "FINDINGS", "last_updated_start_date": last_updated_start}
+
+    if last_updated_end is not None:
+        base = {"report_type": "FINDINGS", "last_updated_start_date": last_updated_start, "last_updated_end_date": last_updated_end}
+
     variants: List[Dict[str, Any]] = [
-        {**base, **_maybe({"app_id": app_id, "policy_sandbox": policy_sandbox, "sandbox_id": sandbox_id, "last_updated_end_date": last_updated_end})},
         {**base, **_maybe({"app_id": app_id, "policy_sandbox": policy_sandbox, "sandbox_id": sandbox_id})},
-        {**base, **_maybe({"app_id": app_id, "policy_sandbox": policy_sandbox, "last_updated_end_date": last_updated_end})},
         {**base, **_maybe({"app_id": app_id, "policy_sandbox": policy_sandbox})},
         base,
     ]
