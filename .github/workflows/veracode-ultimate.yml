@@ -107,7 +107,6 @@ jobs:
           import json
           from collections import Counter
 
-          # Batch-fix CWE allow lists per language (defines "all batch covered flaws")
           ALLOW = {
             "java":       {"80","89","113","117","159","209","331","404","597","611"},
             "kotlin":     {"80","89","113","117","331","404"},
@@ -131,9 +130,20 @@ jobs:
           }
 
           def norm(p): return (p or "").replace("\\","/").strip()
+
+          def canonicalize_path(p: str) -> str:
+            # UNIVERSAL normalization to prevent Fix double-prefix issues on JVM repos
+            p = norm(p).lstrip("./").lstrip("/")
+            if p.startswith("src/main/java/"):
+              p = p[len("src/main/java/"):]
+            if p.startswith("src/main/webapp/"):
+              p = p[len("src/main/webapp/"):]
+            return p
+
           def src_path(f):
             src = ((f.get("files") or {}).get("source_file") or {})
-            return norm(src.get("file") or src.get("upload_file") or "")
+            raw = src.get("file") or src.get("upload_file") or ""
+            return canonicalize_path(raw)
 
           data = json.load(open("filtered_results.json","r",encoding="utf-8"))
           findings = data.get("findings", []) if isinstance(data, dict) else []
@@ -209,14 +219,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Build Fix matrix dynamically from findings (only batch-fixable) + JS root hardening
+      - name: Build Fix matrix dynamically from findings (only batch-fixable) + JS root hardening + JVM canonicalization
         id: mk
         run: |
           python - << 'PY'
           import json, os
           from collections import Counter
 
-          # Batch-fix CWE allow lists per language (defines "all batch covered flaws")
           ALLOW = {
             "java":       {"80","89","113","117","159","209","331","404","597","611"},
             "kotlin":     {"80","89","113","117","331","404"},
@@ -239,15 +248,24 @@ jobs:
             ".go":"go",
           }
 
-          # Roots that can show up in findings but should never be used as "source root" mappings
           IGNORE_ROOTS = {"target","dist","build","out",".veracode",".github","node_modules"}
 
           def norm(p: str) -> str:
             return (p or "").replace("\\","/").strip()
 
+          def canonicalize_path(p: str) -> str:
+            p = norm(p).lstrip("./").lstrip("/")
+            # JVM normalization to avoid double-prefix rewrites
+            if p.startswith("src/main/java/"):
+              p = p[len("src/main/java/"):]
+            if p.startswith("src/main/webapp/"):
+              p = p[len("src/main/webapp/"):]
+            return p
+
           def src_path(f: dict) -> str:
             src = ((f.get("files") or {}).get("source_file") or {})
-            return norm(src.get("file") or src.get("upload_file") or "")
+            raw = src.get("file") or src.get("upload_file") or ""
+            return canonicalize_path(raw)
 
           data = json.load(open("pipeline_out/filtered_results.json","r",encoding="utf-8"))
           findings = data.get("findings", []) if isinstance(data, dict) else []
@@ -271,23 +289,21 @@ jobs:
             if cid and cid in ALLOW.get(lang, set()):
               lang_fixable_counts[lang] += 1
 
-            # For JS mapping: derive roots from findings (no os.path.isdir checks)
             if lang == "javascript":
               parts = p.split("/")
               if parts and parts[0] and parts[0] not in IGNORE_ROOTS:
                 js_root_counts[parts[0]] += 1
 
-          # For JS/TS: top 3 roots from findings. Never empty.
+          # JS/TS: derive top 3 roots from findings (no os.path.isdir)
           js_roots = [r for r,_ in js_root_counts.most_common(3)]
           if not js_roots:
             js_roots = ["src"]
 
           def mk_map(a: str, b: str) -> str:
-            # Veracode format "FROM:TO"
             return f"{a}:{b}"
 
           def java_maps():
-            # Working format you already validated
+            # Use your proven mapping style
             return (
               mk_map("com/","src/main/java/com/"),
               mk_map("WEB-INF","src/main/webapp/WEB-INF"),
@@ -304,7 +320,7 @@ jobs:
             "go":     (mk_map("src/","src/"), mk_map("src/","src/"), mk_map("src/","src/")),
           }
 
-          # JS maps: top 3 roots from findings; fill to 3 by duplicating first. Never empty.
+          # JS: top 3 roots; always supply 3 mappings (never empty)
           js_maps = [mk_map(f"{r}/", f"{r}/") for r in js_roots[:3]]
           while len(js_maps) < 3:
             js_maps.append(js_maps[0])
@@ -367,7 +383,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Filter Fix input to language=${{ matrix.language }} and allowed CWEs only
+      - name: Filter Fix input to language=${{ matrix.language }} and allowed CWEs only (with JVM canonicalization + dedupe)
         id: filter
         run: |
           set -euo pipefail
@@ -395,9 +411,20 @@ jobs:
             raise SystemExit(f"No ext mapping for {lang}")
 
           def norm(p): return (p or "").replace("\\","/").strip()
+
+          def canonicalize_path(p: str) -> str:
+            # Prevent double-prefix issues for JVM repos
+            p = norm(p).lstrip("./").lstrip("/")
+            if p.startswith("src/main/java/"):
+              p = p[len("src/main/java/"):]
+            if p.startswith("src/main/webapp/"):
+              p = p[len("src/main/webapp/"):]
+            return p
+
           def src_path(f):
             src = ((f.get("files") or {}).get("source_file") or {})
-            return norm(src.get("file") or src.get("upload_file") or "")
+            raw = src.get("file") or src.get("upload_file") or ""
+            return canonicalize_path(raw)
 
           data = json.load(open(inp, "r", encoding="utf-8"))
           findings = data.get("findings", []) if isinstance(data, dict) else []
@@ -412,18 +439,35 @@ jobs:
             cwe = str(f.get("cwe_id") or "").strip()
             if allow and cwe not in allow:
               continue
+
+            # write canonical path back so Fix sees only one style
+            if "files" in f and "source_file" in (f.get("files") or {}):
+              f["files"]["source_file"]["file"] = src_path(f)
+
             kept.append(f)
+
+          # Dedupe: same (path,line,cwe) often appears twice in mixed repos
+          seen = set()
+          deduped = []
+          for f in kept:
+            p = src_path(f).lower()
+            line = str(((f.get("files") or {}).get("source_file") or {}).get("line") or f.get("source_file_line") or "")
+            cwe = str(f.get("cwe_id") or "").strip()
+            key = (p, line, cwe)
+            if key in seen:
+              continue
+            seen.add(key)
+            deduped.append(f)
+          kept = deduped
 
           data2 = dict(data)
           data2["findings"] = kept
           json.dump(data2, open(outp, "w", encoding="utf-8"), indent=2)
 
-          # step outputs
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as g:
             g.write(f"count={len(kept)}\n")
             g.write(f"file={outp}\n")
 
-          # per-language telemetry file
           t = {
             "language": lang,
             "allowed_cwes": sorted(list(allow), key=lambda x: int(x)),
