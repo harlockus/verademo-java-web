@@ -9,6 +9,14 @@ on:
         description: "Run Veracode Fix batch after scan (creates PR when not in PR event)"
         required: true
         default: "true"
+      fix_severities:
+        description: "Severities Fix should attempt (comma-separated): 5=VERY_HIGH,4=HIGH,3=MEDIUM,2=LOW,1=VERY_LOW,0=INFO"
+        required: true
+        default: "5,4"
+      max_findings_per_language:
+        description: "Cap per language after filtering (0 = no cap; may run a long time)"
+        required: true
+        default: "100"
 
 permissions:
   contents: write
@@ -113,7 +121,6 @@ jobs:
           import json
           from collections import Counter
 
-          # Batch-fix CWE allow lists per language (batch mode)
           ALLOW = {
             "java":       {"80","89","113","117","159","209","331","404","597","611"},
             "kotlin":     {"80","89","113","117","331","404"},
@@ -137,7 +144,6 @@ jobs:
           }
 
           def norm(p): return (p or "").replace("\\","/").strip()
-
           def src_path(f):
             src = ((f.get("files") or {}).get("source_file") or {})
             return norm(src.get("file") or src.get("upload_file") or "")
@@ -154,7 +160,6 @@ jobs:
           for f in findings:
             if not isinstance(f, dict):
               continue
-
             sev[str(f.get("severity","UNKNOWN"))] += 1
             cid = str(f.get("cwe_id") or "").strip()
             if cid:
@@ -227,7 +232,6 @@ jobs:
           import json, os
           from collections import Counter
 
-          # Batch-fix CWE allow lists per language (batch mode)
           ALLOW = {
             "java":       {"80","89","113","117","159","209","331","404","597","611"},
             "kotlin":     {"80","89","113","117","331","404"},
@@ -290,39 +294,37 @@ jobs:
                 js_root_counts[parts[0]] += 1
 
           def mk_map(frm: str, to: str) -> str:
-            # Veracode format "FROM:TO"
             return f"{frm}:{to}"
 
-          # IMPORTANT: Java mapping must handle BOTH:
-          # - com/...  (from scan)  -> src/main/java/com/...
-          # - src/main/java/... already repo-relative -> identity (prevents double-prefix)
+          # Always provide 3 NON-EMPTY mappings (Fix action can misbehave on empty strings)
+          # Java: handle both "src/main/java/..." and "com/..." and JSP WEB-INF.
           JAVA_SBP = (
-            mk_map("src/main/java/", "src/main/java/"),          # identity
-            mk_map("com/", "src/main/java/com/"),                # for com/...
-            mk_map("WEB-INF", "src/main/webapp/WEB-INF"),        # for WEB-INF/...
+            mk_map("src/main/java/", "src/main/java/"),     # identity
+            mk_map("com/", "src/main/java/com/"),           # com -> src/main/java/com
+            mk_map("WEB-INF", "src/main/webapp/WEB-INF"),   # WEB-INF -> src/main/webapp/WEB-INF
           )
 
-          # JS: pick up to 3 top roots from findings; ensure at least one
+          # JS: top 3 roots from findings; identity mappings; never empty.
           js_roots = [r for r,_ in js_root_counts.most_common(3)]
           if not js_roots:
             js_roots = ["src"]
-
-          JS_SBP = []
-          for r in js_roots[:3]:
-            JS_SBP.append(mk_map(f"{r}/", f"{r}/"))             # identity for repo-relative roots
+          JS_SBP = [mk_map(f"{r}/", f"{r}/") for r in js_roots[:3]]
           while len(JS_SBP) < 3:
             JS_SBP.append(JS_SBP[0])
           JS_SBP = tuple(JS_SBP[:3])
+
+          # Safe defaults (non-empty) for other languages
+          DEFAULT_SBP = (mk_map("src/", "src/"), mk_map("src/", "src/"), mk_map("src/", "src/"))
 
           BASE = {
             "java": JAVA_SBP,
             "kotlin": (mk_map("src/main/kotlin/", "src/main/kotlin/"), mk_map("com/", "src/main/kotlin/com/"), mk_map("src/main/java/", "src/main/java/")),
             "scala":  (mk_map("src/main/scala/", "src/main/scala/"),   mk_map("com/", "src/main/scala/com/"),  mk_map("src/main/java/", "src/main/java/")),
-            "csharp": (mk_map("src/", "src/"), mk_map("", ""), mk_map("", "")),
+            "csharp": DEFAULT_SBP,
             "javascript": JS_SBP,
-            "python": (mk_map("src/", "src/"), mk_map("app/", "app/"), mk_map("", "")),
-            "php":    (mk_map("src/", "src/"), mk_map("", ""), mk_map("", "")),
-            "go":     (mk_map("", ""), mk_map("", ""), mk_map("", "")),
+            "python": (mk_map("src/", "src/"), mk_map("app/", "app/"), mk_map("src/", "src/")),
+            "php": DEFAULT_SBP,
+            "go": DEFAULT_SBP,
           }
 
           include = []
@@ -336,7 +338,6 @@ jobs:
           include = sorted(include, key=lambda x: x["language"])
           matrix = {"include": include}
 
-          # Always write a valid JSON matrix, even if empty
           matrix_str = json.dumps(matrix, separators=(",", ":"))
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
             out.write(f"matrix={matrix_str}\n")
@@ -365,11 +366,16 @@ jobs:
       && needs.build_fix_matrix.outputs.matrix != ''
       && needs.build_fix_matrix.outputs.matrix != '{"include":[]}'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix: ${{ fromJson(needs.build_fix_matrix.outputs.matrix) }}
+
+    env:
+      # Allow customer to choose at manual run time; sensible defaults for PR runs
+      FIX_SEVERITIES: ${{ github.event_name == 'workflow_dispatch' && inputs.fix_severities || '5,4' }}
+      MAX_FINDINGS_PER_LANGUAGE: ${{ github.event_name == 'workflow_dispatch' && inputs.max_findings_per_language || '100' }}
 
     steps:
       - name: Checkout
@@ -386,7 +392,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Filter Fix input to language=${{ matrix.language }} and allowed CWEs only
+      - name: Filter Fix input to language=${{ matrix.language }} + CWEs + selected severities + cap
         id: filter
         run: |
           set -euo pipefail
@@ -394,7 +400,9 @@ jobs:
           import json, os
 
           lang = os.environ["LANG"]
-          allow = set(os.environ["ALLOW_CWES"].split(",")) if os.environ.get("ALLOW_CWES") else set()
+          allow_cwes = set((os.environ.get("ALLOW_CWES") or "").split(",")) if os.environ.get("ALLOW_CWES") else set()
+          sev_allow = set(s.strip() for s in (os.environ.get("FIX_SEVERITIES") or "").split(",") if s.strip() != "")
+          cap = int(os.environ.get("MAX_FINDINGS_PER_LANGUAGE", "0") or "0")
 
           inp = "pipeline_out/filtered_results.json"
           outp = f"pipeline_out/filtered_results_{lang}.json"
@@ -409,7 +417,6 @@ jobs:
             "php": [".php"],
             "go": [".go"],
           }
-
           exts = LANG_EXTS.get(lang, [])
           if not exts:
             raise SystemExit(f"No ext mapping for {lang}")
@@ -419,6 +426,14 @@ jobs:
           def src_path(f):
             src = ((f.get("files") or {}).get("source_file") or {})
             return norm(src.get("file") or src.get("upload_file") or "")
+
+          def sev_int(f):
+            try: return int(f.get("severity", 0) or 0)
+            except Exception: return 0
+
+          def sev_str(f):
+            v = f.get("severity", None)
+            return str(v) if v is not None else ""
 
           data = json.load(open(inp, "r", encoding="utf-8"))
           findings = data.get("findings", []) if isinstance(data, dict) else []
@@ -433,10 +448,21 @@ jobs:
             pl = p.lower()
             if not any(pl.endswith(e) for e in exts):
               continue
+
             cwe = str(f.get("cwe_id") or "").strip()
-            if allow and cwe not in allow:
+            if allow_cwes and cwe not in allow_cwes:
               continue
+
+            s = sev_str(f).strip()
+            if sev_allow and s not in sev_allow:
+              continue
+
             kept.append(f)
+
+          kept.sort(key=sev_int, reverse=True)
+
+          if cap > 0 and len(kept) > cap:
+            kept = kept[:cap]
 
           data2 = dict(data)
           data2["findings"] = kept
@@ -448,16 +474,20 @@ jobs:
 
           t = {
             "language": lang,
-            "allowed_cwes": sorted(list(allow), key=lambda x: int(x)),
-            "batch_fixable_findings_in_input": len(kept),
+            "allowed_cwes": sorted(list(allow_cwes), key=lambda x: int(x)),
+            "selected_severities": sorted(list(sev_allow)) if sev_allow else "ALL",
+            "cap_per_language": cap,
+            "findings_fed_to_fix": len(kept),
           }
           json.dump(t, open(f"veracode_telemetry_fix_input_{lang}.json","w",encoding="utf-8"), indent=2)
 
-          print(f"Filtered for {lang} (allowed CWEs only): {len(kept)}")
+          print(f"Filtered for {lang}: {len(kept)} findings (severities={sorted(sev_allow) if sev_allow else 'ALL'}, cap={cap})")
           PY
         env:
           LANG: ${{ matrix.language }}
           ALLOW_CWES: ${{ matrix.cwe }}
+          FIX_SEVERITIES: ${{ env.FIX_SEVERITIES }}
+          MAX_FINDINGS_PER_LANGUAGE: ${{ env.MAX_FINDINGS_PER_LANGUAGE }}
 
       - name: Upload per-language Fix input telemetry
         if: always()
@@ -473,10 +503,10 @@ jobs:
           name: veracode-fix-input-json-${{ matrix.language }}
           path: ${{ steps.filter.outputs.file }}
 
-      - name: Skip Fix when no batch-fixable findings for this language
+      - name: Skip Fix when no findings match filters for this language
         if: steps.filter.outputs.count == '0'
         run: |
-          echo "No batch-fixable findings for language=${{ matrix.language }}. Skipping Fix."
+          echo "No findings after CWE+severity+cap for language=${{ matrix.language }}. Skipping Fix."
 
       - name: Run Veracode Fix (Batch → PR) — language=${{ matrix.language }}
         if: steps.filter.outputs.count != '0'
