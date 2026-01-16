@@ -50,6 +50,7 @@ import com.veracode.verademo.model.Blabber;
 import com.veracode.verademo.utils.Constants;
 import com.veracode.verademo.utils.User;
 import com.veracode.verademo.utils.UserFactory;
+import java.util.*;
 
 /**
  * @author johnadmin
@@ -161,6 +162,18 @@ public class UserController {
 			logger.info("Creating the Statement");
 			String sqlQuery = "select username, password, password_hint, created_at, last_login, real_name, blab_name from users where username='"
 					+ username + "' and password='" + md5(password) + "';";
+		Set<String> whitelistMd5Password = new HashSet<>(Arrays.asList("item1", "item2", "item3"));
+		if (!md5(password).matches("\\w+(\\s*\\.\\s*\\w+)*") && !whitelistMd5Password.contains(md5(password)))
+		    throw new IllegalArgumentException();
+		Set<String> whitelistDisplayerrorforwebExceptsql = new HashSet<>(Arrays.asList("item1", "item2", "item3"));
+		if (!displayErrorForWeb(exceptSql).matches("\\w+(\\s*\\.\\s*\\w+)*") && !whitelistDisplayerrorforwebExceptsql.contains(displayErrorForWeb(exceptSql)))
+		    throw new IllegalArgumentException();
+		Set<String> whitelistNextview = new HashSet<>(Arrays.asList("item1", "item2", "item3"));
+		if (!nextView.matches("\\w+(\\s*\\.\\s*\\w+)*") && !whitelistNextview.contains(nextView))
+		    throw new IllegalArgumentException();
+		Set<String> whitelistTarget = new HashSet<>(Arrays.asList("item1", "item2", "item3"));
+		if (!target.matches("\\w+(\\s*\\.\\s*\\w+)*") && !whitelistTarget.contains(target))
+		    throw new IllegalArgumentException();
 			sqlStatement = connect.createStatement();
 			logger.info("Execute the Statement");
 			ResultSet result = sqlStatement.executeQuery(sqlQuery);
@@ -234,33 +247,30 @@ public class UserController {
 	@ResponseBody
 	public String showPasswordHint(String username)
 	{
-		logger.info("Entering password-hint with username: " + username);
-
-		if (username == null || username.isEmpty()) {
-			return "No username provided, please type in your username first";
-		}
-
-		try {
-			Class.forName("com.mysql.jdbc.Driver");
-
-			Connection connect = DriverManager.getConnection(Constants.create().getJdbcConnectionString());
-
-			String sql = "SELECT password_hint FROM users WHERE username = '" + username + "'";
-			logger.info(sql);
-			Statement statement = connect.createStatement();
-			ResultSet result = statement.executeQuery(sql);
-			if (result.first()) {
-				String password= result.getString("password_hint");
-				String formatString = "Username '" + username + "' has password: %.2s%s";
-				logger.info(formatString);
-				return String.format(
-						formatString,
-						password,
-						String.format("%0" + (password.length() - 2) + "d", 0).replace("0", "*")
-				);
-			}
-			else {
-				return "No password found for " + username;
+logger.info("Entering password-hint with username: " + username);
+    if (username == null || username.isEmpty()) {
+        return "No username provided, please type in your username first";
+    }
+    try {
+        Class.forName("com.mysql.jdbc.Driver");
+        Connection connect = DriverManager.getConnection(Constants.create().getJdbcConnectionString());
+        String sql = "SELECT password_hint FROM users WHERE username = ?";
+        logger.info(sql);
+        PreparedStatement preparedStatement = connect.prepareStatement(sql);
+        preparedStatement.setString(1, username);
+        ResultSet result = preparedStatement.executeQuery();
+        if (result.first()) {
+            String password= result.getString("password_hint");
+            String formatString = "Username '" + username + "' has password: %.2s%s";
+            logger.info(formatString);
+            return String.format(
+            formatString,
+            password,
+            String.format("%0" + (password.length() - 2) + "d", 0).replace("0", "*")
+            );
+        }
+        else {
+            return "No password found for " + username;
 			}
 		} catch (ClassNotFoundException e) {
 			e.printStackTrace();
@@ -311,11 +321,12 @@ public class UserController {
 			Class.forName("com.mysql.jdbc.Driver");
 			Connection connect = DriverManager.getConnection(Constants.create().getJdbcConnectionString());
 
-			String sql = "SELECT username FROM users WHERE username = '" + username + "'";
-			Statement statement = connect.createStatement();
-			ResultSet result = statement.executeQuery(sql);
-			if (result.first()) {
-				model.addAttribute("error", "Username '" + username + "' already exists!");
+String sql = "SELECT username FROM users WHERE username = ?";
+PreparedStatement preparedStatement = connect.prepareStatement(sql);
+preparedStatement.setString(1, username);
+ResultSet result = preparedStatement.executeQuery();
+if (result.next()) {
+    model.addAttribute("error", "Username '" + username + "' already exists!");
 				return "register";
 			}
 			else {
@@ -359,29 +370,24 @@ public class UserController {
 		}
 
 		Connection connect = null;
-		Statement sqlStatement = null;
-
-		try {
-			// Get the Database Connection
-			logger.info("Creating the Database connection");
-			Class.forName("com.mysql.jdbc.Driver");
-			connect = DriverManager.getConnection(Constants.create().getJdbcConnectionString());
-
-			/* START BAD CODE */
-			// Execute the query
-			String mysqlCurrentDateTime = (new SimpleDateFormat("yyyy-MM-dd HH:mm:ss"))
-					.format(Calendar.getInstance().getTime());
-			StringBuilder query = new StringBuilder();
-			query.append("insert into users (username, password, created_at, real_name, blab_name) values(");
-			query.append("'" + username + "',");
-			query.append("'" + password + "',");
-			query.append("'" + mysqlCurrentDateTime + "',");
-			query.append("'" + realName + "',");
-			query.append("'" + blabName + "'");
-			query.append(");");
-
-			sqlStatement = connect.createStatement();
-			sqlStatement.execute(query.toString());
+PreparedStatement sqlStatement = null;
+try {
+    // Get the Database Connection
+    logger.info("Creating the Database connection");
+    Class.forName("com.mysql.jdbc.Driver");
+    connect = DriverManager.getConnection(Constants.create().getJdbcConnectionString());
+    /* START BAD CODE */
+    // Execute the query
+    String mysqlCurrentDateTime = (new SimpleDateFormat("yyyy-MM-dd HH:mm:ss"))
+    .format(Calendar.getInstance().getTime());
+    String query = "insert into users (username, password, created_at, real_name, blab_name) values(?, ?, ?, ?, ?)";
+    sqlStatement = connect.prepareStatement(query);
+    sqlStatement.setString(1, username);
+    sqlStatement.setString(2, password);
+    sqlStatement.setString(3, mysqlCurrentDateTime);
+    sqlStatement.setString(4, realName);
+    sqlStatement.setString(5, blabName);
+    sqlStatement.execute();
 			logger.info(query.toString());
 			/* END BAD CODE */
 
@@ -491,8 +497,9 @@ public class UserController {
 			String sqlMyEvents = "select event from users_history where blabber=\"" + username
 					+ "\" ORDER BY eventid DESC; ";
 			logger.info(sqlMyEvents);
-			Statement sqlStatement = connect.createStatement();
-			ResultSet userHistoryResult = sqlStatement.executeQuery(sqlMyEvents);
+PreparedStatement sqlStatement = connect.prepareStatement("select event from users_history where blabber=? ORDER BY eventid DESC");
+sqlStatement.setString(1, username);
+ResultSet userHistoryResult = sqlStatement.executeQuery();
 			/* END BAD CODE */
 
 			while (userHistoryResult.next()) {
@@ -500,10 +507,11 @@ public class UserController {
 			}
 
 			// Get the users information
-			String sql = "SELECT username, real_name, blab_name FROM users WHERE username = '" + username + "'";
-			logger.info(sql);
-			myInfo = connect.prepareStatement(sql);
-			ResultSet myInfoResults = myInfo.executeQuery();
+String sql = "SELECT username, real_name, blab_name FROM users WHERE username = ?";
+logger.info(sql);
+myInfo = connect.prepareStatement(sql);
+myInfo.setString(1, username);
+ResultSet myInfoResults = myInfo.executeQuery();
 			myInfoResults.next();
 
 			// Send these values to our View
