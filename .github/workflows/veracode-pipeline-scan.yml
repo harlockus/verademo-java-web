@@ -45,6 +45,10 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Install Python 3rd party dependencies
+        run: |
+          pip install -r requirements.txt
+
       - name: Download Veracode Pipeline Scan tool
         run: |
           curl -sSLO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
@@ -89,3 +93,11 @@ jobs:
             veracode-pipeline.sarif
             veracode-pipeline-sarif-stats.json
             .veracode/PIPELINE_SCAN_GLOBAL_FINDINGS.md
+
+      - name: Upload SARIF Log Files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Veracode-Log-Files
+          path: |
+            Veracode/SARIF_logs/*.log

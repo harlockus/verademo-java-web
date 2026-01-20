@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Veracode Pipeline Scan JSON -> SARIF 2.1.0 (GitHub Code Scanning).
+Veracode Pipeline Scan JSON -> SARIF 2.1.0 for GitHub Code Scanning.
 
 Goals:
 - Show ALL findings in GitHub Code Scanning
@@ -19,13 +19,31 @@ Each finding usually has:
   - files.source_file.line
 """
 
+import anticrlf
 import argparse
 import hashlib
 import json
+import logging
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, Iterable, List, Tuple
+from Finding import Finding
 
-SEV_MAP = {
+# =============================================================================
+# Constants & key groups
+# =============================================================================
+
+# Preferred keys for different fields in incoming Veracode JSON
+KEYS_SEVERITY   = ["severity", "severity_level", "severityCode"]
+KEYS_CWE        = ["cwe", "cwe_id", "cweId"]
+KEYS_CATEGORY   = ["category", "categoryname", "category_name"]
+KEYS_MESSAGE    = ["display_text", "message", "description", "issue_type"]
+KEYS_FILE       = ["file_path", "file", "filename", "source_file"]
+KEYS_LINE       = ["line", "line_number", "lineNumber"]
+
+# Maps Veracode severity code strings to SARIF data
+SEVERITY_MAP: Dict[str, Tuple[str, str, str]] = {
     "5": ("error",   "VERY_HIGH", "9.5"),
     "4": ("error",   "HIGH",      "8.0"),
     "3": ("warning", "MEDIUM",    "5.5"),
@@ -35,25 +53,62 @@ SEV_MAP = {
 }
 
 # Try common Java/web roots (safe even if they don't exist)
-SOURCE_ROOTS = [
-    "",
-    "src/main/java/",
-    "src/main/webapp/",
-    "src/main/resources/",
-    "src/",
-]
+SOURCE_ROOTS = ["", "src/main/java/", "src/main/webapp/", "src/main/resources/", "src/"]
+
+# =============================================================================
+# Simple utilities
+# =============================================================================
+
+# Define global variables
+log = logging.getLogger(__name__)
+LOCAL_PATH = "Veracode/SARIF_logs/"
+today_date=datetime.now().strftime('%Y-%m-%d')
+today = datetime.now().strftime("%Y%m%dT%H%M%S")
+
+def logprint(log_msg):
+    log.info(log_msg)
+    print(log_msg)
+
+def setup_logger():
+    # Create local log directory if it doesn't exist
+    os.makedirs(LOCAL_PATH, exist_ok=True)
+    LOCAL_LOCATION = f"{LOCAL_PATH}Veracode - pipeline_results_to_sarif_script{today}.log"
+    print("Setting log file to {}".format(LOCAL_LOCATION))
+    handler = logging.FileHandler(LOCAL_LOCATION, encoding='utf8')
+    handler.setFormatter(anticrlf.LogFormatter('%(asctime)s - %(levelname)s - %(funcName)s - %(message)s'))
+    log = logging.getLogger(__name__)
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+
+@dataclass(frozen=True)
+class Severity:
+    """Typed, readable container for severity mapping results."""
+    level: str   # SARIF level: "error" | "warning" | "note"
+    label: str   # Human-readable label: e.g., "HIGH"
+    gh_score: str  # GitHub security score string
 
 def sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
+def normalize_repo_path(path: str) -> str:
+    """
+    Make paths repo-friendly and consistent (forward slashes, trim, drop leading './').
+    """
+    p = (path or "").replace("\\", "/").strip()
+    return p[2:] if p.startswith("./") else p
+
+def first_of(obj: Dict[str, Any], keys: Iterable[str]) -> Any:
+    """
+    Return first present & non-None value for any of the provided keys.
+    """
+    for k in keys:
+        v = obj.get(k)
+        if v is not None:
+            return v
+    return None
+
 def as_str(x: Any) -> str:
     return "" if x is None else str(x)
-
-def normalize_path(p: str) -> str:
-    p = p.replace("\\", "/").strip()
-    if p.startswith("./"):
-        p = p[2:]
-    return p.lstrip("/")
 
 def safe_int(x: Any, default: int = 1) -> int:
     try:
@@ -62,195 +117,350 @@ def safe_int(x: Any, default: int = 1) -> int:
     except Exception:
         return default
 
-def stable_placeholder_line(rule_id: str, msg: str) -> int:
-    h = sha256_text(f"{rule_id}|{msg}")
+def get_text(obj: Dict[str, Any], keys: Iterable[str], default: str = "") -> str:
+    """
+    Get a trimmed string for the first matching key; otherwise default.
+    """
+    v = first_of(obj, keys)
+    s = "" if v is None else str(v).strip()
+    return s if s else default
+
+def get_int(obj: Dict[str, Any], keys: Iterable[str], default: int = 1) -> int:
+    """
+    Get a positive integer (>=1). Fallback to default on errors or invalid values.
+    """
+    v = first_of(obj, keys)
+    try:
+        num = int(str(v))
+        return num if num >= 1 else default
+    except Exception:
+        return default
+
+def stable_placeholder_line(rule_id: str, message_text: str) -> int:
+    """
+    Produce a stable line number 1..20000 based on rule_id and message.
+    Ensures placeholder lines are deterministic for GitHub annotations.
+    """
+    h = sha256_text(f"{rule_id}\n{message_text}")
     return (int(h[:8], 16) % 20000) + 1
 
-def strip_build_prefix(p: str) -> str:
+# =============================================================================
+# Domain helpers
+# =============================================================================
+
+def map_severity(item: Dict[str, Any]) -> Severity:
     """
-    Strip common build output prefixes seen in pipeline scan results.
-    Examples:
-      target/verademo/WEB-INF/views/profile.jsp -> WEB-INF/views/profile.jsp
-      target/classes/com/x/Foo.class -> com/x/Foo.class
+    Map Veracode severity fields to SARIF level, label, and GitHub security score.
+    Defaults to ('warning', 'UNKNOWN', '0.0') if not found.
     """
-    p = normalize_path(p)
-    if p.startswith("target/"):
-        rest = p[len("target/"):]
-        if "/" in rest:
-            rest = rest.split("/", 1)[1]
-        return rest
-    return p
+    raw = get_text(item, KEYS_SEVERITY)
+    level, label, score = SEVERITY_MAP.get(raw, ("warning", "UNKNOWN", "0.0"))
+    return Severity(level=level, label=label, gh_score=score)
 
-def resolve_repo_uri(repo_root: str, raw_path: str) -> Optional[str]:
-    raw_path = strip_build_prefix(raw_path)
+def determine_rule_id_and_name(cwe_str: str, category: str) -> Tuple[str, str]:
+    """
+    Choose a rule ID and readable rule name.
 
-    # Try under known source roots
-    for root in SOURCE_ROOTS:
-        candidate = normalize_path((root + raw_path) if root else raw_path)
-        full = os.path.join(repo_root, candidate)
-        if os.path.isfile(full):
-            return candidate
+    Priority:
+    1) If CWE is present -> ensure it is 'CWE-<ID>' format (uppercased).
+    2) Else if category is present -> VERACODE-<10-char hash prefix>.
+    3) Else -> 'VERACODE-ISSUE'.
+    Rule name is category if present, otherwise rule ID.
+    """
+    if cwe_str:
+        cwe_up = cwe_str.upper()
+        rule_id = cwe_up if cwe_up.startswith("CWE-") else f"CWE-{cwe_str}"
+        return rule_id, (category or rule_id)
 
-    # Try raw as-is
-    raw_norm = normalize_path(raw_path)
-    if os.path.isfile(os.path.join(repo_root, raw_norm)):
-        return raw_norm
+    if category:
+        rule_id = f"VERACODE-{sha256_text(category)[:10].upper()}"
+        return rule_id, category
 
-    return None
+    return "VERACODE-ISSUE", "VERACODE-ISSUE"
 
-def extract_file_and_line(finding: Dict[str, Any]) -> Tuple[Optional[str], Optional[int]]:
-    files = finding.get("files") or {}
-    src = files.get("source_file") or {}
+def compute_location(
+    file_path: str,
+    line: int,
+    rule_id: str,
+    message_text: str,
+    placeholder_uri: str,
+) -> Tuple[str, int, bool]:
+    """
+    Decide URI and line for a finding. If no file path, anchor to placeholder with a
+    deterministic line number.
+    Returns: (uri, start_line, is_placeholder)
+    """
+    if file_path:
+        return normalize_repo_path(file_path), line, False
+    return placeholder_uri, stable_placeholder_line(rule_id, message_text), True
 
-    path = src.get("file") or src.get("upload_file") or ""
-    line = src.get("line")
+def build_rule(
+    rule_id: str,
+    rule_name: str,
+    message_text: str,
+    sev_label: str,
+    gh_sec_score: str,
+    cwe_str: str,
+) -> Dict[str, Any]:
+    """
+    Construct a SARIF rule entry with helpful security metadata.
+    """
+    return {
+        "id": rule_id,
+        "name": rule_name,
+        "shortDescription": {"text": rule_name},
+        "fullDescription": {"text": message_text or rule_name},
+        "help": {
+            "text": f"{rule_name}\nSeverity: {sev_label}\nRule: {rule_id}"
+        },
+        "properties": {
+            "tags": ["security", "veracode", "pipeline-scan"],
+            "security-severity": gh_sec_score,
+            "precision": "high",
+            "veracode-severity": sev_label,
+            "cwe": cwe_str or "",
+        },
+    }
 
-    path_s = as_str(path).strip()
-    if not path_s:
-        return None, None
-
-    line_i = safe_int(line, default=1) if line is not None else None
-    return path_s, line_i
-
-def rule_id_from_finding(finding: Dict[str, Any]) -> Tuple[str, str, str]:
-    cwe_id = as_str(finding.get("cwe_id")).strip()
-    issue_type = as_str(finding.get("issue_type")).strip()
-    title = as_str(finding.get("title")).strip()
-
-    if cwe_id:
-        rid = f"CWE-{cwe_id}" if not cwe_id.upper().startswith("CWE-") else cwe_id.upper()
-    else:
-        rid = "VERACODE-ISSUE"
-
-    name = issue_type or title or rid
-    desc = issue_type or title or name
-    return rid, name, desc
-
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True)
-    ap.add_argument("--output", required=True)
-    ap.add_argument("--placeholder-uri", required=True)
-    ap.add_argument("--output-stats", required=True)
-    ap.add_argument("--tool-name", default="Veracode Pipeline Scan")
-    ap.add_argument("--tool-version", default="")
-    args = ap.parse_args()
-
-    repo_root = os.getenv("GITHUB_WORKSPACE", os.getcwd())
-    placeholder_uri = normalize_path(args.placeholder_uri)
-
-    with open(args.input, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-
-    findings = payload.get("findings") if isinstance(payload, dict) else None
-    if not isinstance(findings, list):
-        raise SystemExit("Expected an object with a 'findings' array (pipeline results JSON).")
-
-    rules: Dict[str, Dict[str, Any]] = {}
-    results: List[Dict[str, Any]] = []
-
-    total = 0
-    with_file = 0
-    with_placeholder = 0
-    unresolved_paths = 0
-
-    for finding in findings:
-        if not isinstance(finding, dict):
-            continue
-        total += 1
-
-        sev_raw = as_str(finding.get("severity")).strip()
-        sarif_level, sev_label, gh_sec_score = SEV_MAP.get(sev_raw, ("warning", "UNKNOWN", "0.0"))
-
-        rid, rname, rdesc = rule_id_from_finding(finding)
-
-        issue_id = as_str(finding.get("issue_id")).strip()
-        msg = f"[{sev_label}] {rdesc}" + (f" (issue_id={issue_id})" if issue_id else "")
-
-        raw_path, raw_line = extract_file_and_line(finding)
-
-        if raw_path and raw_line:
-            resolved = resolve_repo_uri(repo_root, raw_path)
-            if resolved:
-                uri = resolved
-                start_line = int(raw_line)
-                with_file += 1
-            else:
-                uri = placeholder_uri
-                start_line = stable_placeholder_line(rid, msg)
-                with_placeholder += 1
-                unresolved_paths += 1
-        else:
-            uri = placeholder_uri
-            start_line = stable_placeholder_line(rid, msg)
-            with_placeholder += 1
-
-        if rid not in rules:
-            rules[rid] = {
-                "id": rid,
-                "name": rname,
-                "shortDescription": {"text": rname},
-                "fullDescription": {"text": rdesc},
-                "help": {"text": f"{rname}\nSeverity: {sev_label}\nRule: {rid}"},
-                "properties": {
-                    "tags": ["security", "veracode", "pipeline-scan"],
-                    "security-severity": gh_sec_score,
-                    "veracode-severity": sev_label,
-                    "cwe": as_str(finding.get("cwe_id")).strip(),
-                },
-            }
-
-        results.append({
-            "ruleId": rid,
-            "level": sarif_level,
-            "message": {"text": msg},
-            "locations": [{
+def build_result(
+    rule_id: str,
+    issue_id: str,
+    severity: Severity,
+    message_text: str,
+    uri: str,
+    line: int,
+    is_placeholder: bool,
+    raw_path: str
+) -> Dict[str, Any]:
+    """
+    Construct a SARIF result entry with at least one physical location.
+    """
+    titled_msg = f"[{severity.label}] {message_text}" if message_text else severity.label
+    return {
+        "ruleId": rule_id,
+        "level": severity.level,
+        "message": {"text": titled_msg},
+        "locations": [
+            {
                 "physicalLocation": {
                     "artifactLocation": {"uri": uri},
-                    "region": {"startLine": start_line},
+                    "region": {"startLine": line},
                 }
-            }],
-            "properties": {
-                "issue_id": issue_id,
-                "veracode_severity": sev_label,
-                "isPlaceholderLocation": (uri == placeholder_uri),
-                "raw_path": as_str(raw_path),
-                "raw_line": as_str(raw_line),
-            },
-        })
+            }
+        ],
+        "properties": {
+            "issue_id": issue_id,
+            "veracode-severity": severity.label,
+            "isPlaceholderLocation": is_placeholder,
+            "raw_path": as_str(raw_path),
+            "raw_line": as_str(line)
+        },
+    }
+
+def ensure_rule(
+    rules_by_id: Dict[str, Dict[str, Any]],
+    rule_id: str,
+    rule_name: str,
+    message_text: str,
+    severity: Severity,
+    cwe_str: str,
+) -> None:
+    """
+    Insert rule into the rules dictionary if it's not already present.
+    Keeps conversion logic flat and side-effect free.
+    """
+    if rule_id not in rules_by_id:
+        rules_by_id[rule_id] = build_rule(
+            rule_id=rule_id,
+            rule_name=rule_name,
+            message_text=message_text,
+            sev_label=severity.label,
+            gh_sec_score=severity.gh_score,
+            cwe_str=cwe_str,
+        )
+
+def build_driver(tool_name: str, tool_version: str, rules: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Build SARIF 'driver' section with optional version.
+    """
+    driver = {"name": tool_name, "rules": rules}
+    if tool_version:
+        driver["version"] = tool_version
+    return driver
+
+# =============================================================================
+# Conversion pipeline
+# =============================================================================
+
+def convert_to_sarif(
+    data: Dict[str, Any],
+    tool_name: str,
+    tool_version: str,
+    placeholder_uri: str,
+    repo_root
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Core conversion from Veracode Pipeline Scan JSON to SARIF.
+
+    Returns:
+      (sarif_document, stats_dict)
+    """
+    findings = data.get("findings") or data.get("issues") or data.get("results") or []
+    if not isinstance(findings, list):
+        findings = []
+
+    placeholder_uri = normalize_repo_path(placeholder_uri)
+
+    rules_by_id: Dict[str, Dict[str, Any]] = {}
+    results: List[Dict[str, Any]] = []
+
+    count_total = 0
+    count_file_loc = 0
+    count_placeholder_loc = 0
+    count_unresolved_paths = 0
+
+    for finding in findings:
+        # Create an instance of Finding from thefinding
+        this_finding = Finding(finding)
+        logprint(this_finding.print())
+        if not isinstance(finding, dict):
+            continue
+        count_total += 1
+
+        severity = map_severity(finding)
+        cwe_str   = get_text(finding, KEYS_CWE)
+        category  = get_text(finding, KEYS_CATEGORY)
+        rule_id, rule_name = determine_rule_id_and_name(cwe_str, category)
+
+        issue_id     = get_text(finding, ["issue_id"])
+        message_text = get_text(finding, KEYS_MESSAGE, default=rule_name)
+
+        files        = finding.get("files") or {}
+        src          = files.get("source_file") or {}
+        file_path    = src.get("file") or src.get("upload_file") or ""
+        line         = src.get("line")
+        line_int     = safe_int(line)
+        raw_path     = as_str(file_path).strip()
+
+        uri, start_line, is_placeholder = compute_location(
+            file_path=file_path,
+            line=line_int,
+            rule_id=rule_id,
+            message_text=message_text,
+            placeholder_uri=placeholder_uri,
+        )
+        count_file_loc        += (0 if is_placeholder else 1)
+        count_placeholder_loc += (1 if is_placeholder else 0)
+        count_unresolved_paths += (1 if is_placeholder else 0)
+
+        ensure_rule(
+            rules_by_id=rules_by_id,
+            rule_id=rule_id,
+            rule_name=rule_name,
+            message_text=message_text,
+            severity=severity,
+            cwe_str=cwe_str,
+        )
+
+        results.append(
+            build_result(
+                rule_id=rule_id,
+                issue_id=issue_id,
+                severity=severity,
+                message_text=message_text,
+                uri=uri,
+                line=start_line,
+                is_placeholder=is_placeholder,
+                raw_path=raw_path
+            )
+        )
 
     sarif: Dict[str, Any] = {
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
         "runs": [{
-            "tool": {"driver": {
-                "name": args.tool_name,
-                **({"version": args.tool_version} if args.tool_version else {}),
-                "rules": list(rules.values()),
-            }},
+            "tool": {"driver": build_driver(tool_name, tool_version, list(rules_by_id.values()))},
             "results": results,
         }],
     }
 
-    with open(args.output, "w", encoding="utf-8") as f:
-        json.dump(sarif, f, indent=2, ensure_ascii=False)
-
     stats = {
-        "findings_total_in_json": total,
+        "findings_total_in_json": count_total,
         "sarif_results_written": len(results),
-        "sarif_rules_written": len(rules),
-        "results_with_file_location": with_file,
-        "results_with_placeholder_location": with_placeholder,
-        "unresolved_paths_count": unresolved_paths,
+        "sarif_rules_written": len(rules_by_id),
+        "results_with_file_location": count_file_loc,
+        "results_with_placeholder_location": count_placeholder_loc,
+        "unresolved_paths_count": count_unresolved_paths,
         "placeholder_uri": placeholder_uri,
         "repo_root": repo_root,
-        "source_roots_tried": SOURCE_ROOTS,
+        "source_roots_tried": SOURCE_ROOTS
     }
-    with open(args.output_stats, "w", encoding="utf-8") as f:
-        json.dump(stats, f, indent=2, ensure_ascii=False)
+    return sarif, stats
 
-    print("SARIF written:", args.output)
-    print(json.dumps(stats, indent=2))
+# =============================================================================
+# CLI & I/O
+# =============================================================================
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Convert Veracode Pipeline Scan JSON to SARIF 2.1.0"
+    )
+    parser.add_argument("--input", required=True, help="Path to Veracode JSON input")
+    parser.add_argument("--output", required=True, help="Path to SARIF output (.sarif)")
+    parser.add_argument(
+        "--placeholder-uri",
+        required=True,
+        help="Repo-relative path used when findings lack file/line (e.g., 'veracode_placeholder.txt')",
+    )
+    parser.add_argument(
+        "--output-stats",
+        required=True,
+        help="Path to write conversion stats JSON",
+    )
+    parser.add_argument("--tool-name", default="Veracode Pipeline Scan")
+    parser.add_argument("--tool-version", default="")
+    return parser.parse_args()
+
+def read_json(path: str) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def write_json(path: str, data: Dict[str, Any]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+# =============================================================================
+# Entry point (kept as requested)
+# =============================================================================
+
+def main() -> None:
+
+    setup_logger()
+    logprint('======== beginning Veracode - pipeline_results_to_sarif.py run ========')
+
+    args = parse_args()
+    data = read_json(args.input)
+    repo_root = os.getenv("GITHUB_WORKSPACE", os.getcwd())
+
+    sarif, stats = convert_to_sarif(
+        data=data,
+        tool_name=args.tool_name,
+        tool_version=args.tool_version,
+        placeholder_uri=args.placeholder_uri,
+        repo_root=repo_root
+    )
+
+    write_json(args.output, sarif)
+    write_json(args.output_stats, stats)
+
+    print(
+        f"Wrote SARIF: {args.output} "
+        f"(results={len(sarif['runs'][0]['results'])}, "
+        f"rules={len(sarif['runs'][0]['tool']['driver']['rules'])})"
+    )
+    print(f"Wrote stats: {args.output_stats} -> {stats}")
+
+    logprint('======== ending Veracode - pipeline_results_to_sarif.py run ========')
 
 if __name__ == "__main__":
     main()
