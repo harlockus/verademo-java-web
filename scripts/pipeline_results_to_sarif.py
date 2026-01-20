@@ -63,7 +63,7 @@ SOURCE_ROOTS = ["", "src/main/java/", "src/main/webapp/", "src/main/resources/",
 log = logging.getLogger(__name__)
 LOCAL_PATH = "Veracode/SARIF_logs/"
 today_date=datetime.now().strftime('%Y-%m-%d')
-today = datetime.now()
+today = datetime.now().strftime("%Y%m%dT%H%M%S")
 
 def logprint(log_msg):
     log.info(log_msg)
