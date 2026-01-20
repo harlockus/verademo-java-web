@@ -45,6 +45,10 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Install Python 3rd party dependencies
+        run: |
+          pip install -r requirements.txt
+
       - name: Download Veracode Pipeline Scan tool
         run: |
           curl -sSLO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
