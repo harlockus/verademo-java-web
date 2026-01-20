@@ -19,12 +19,16 @@ Each finding usually has:
   - files.source_file.line
 """
 
+import anticrlf
 import argparse
 import hashlib
 import json
+import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Tuple
+from Finding import Finding
 
 # =============================================================================
 # Constants & key groups
@@ -54,6 +58,27 @@ SOURCE_ROOTS = ["", "src/main/java/", "src/main/webapp/", "src/main/resources/",
 # =============================================================================
 # Simple utilities
 # =============================================================================
+
+# Define global variables
+log = logging.getLogger(__name__)
+LOCAL_PATH = "Veracode/SARIF_logs/"
+today_date=datetime.now().strftime('%Y-%m-%d')
+today = datetime.now()
+
+def logprint(log_msg):
+    log.info(log_msg)
+    print(log_msg)
+
+def setup_logger():
+    # Create local log directory if it doesn't exist
+    os.makedirs(LOCAL_PATH, exist_ok=True)
+    LOCAL_LOCATION = f"{LOCAL_PATH}Veracode - pipeline_results_to_sarif_script{today}.log"
+    print("Setting log file to {}".format(LOCAL_LOCATION))
+    handler = logging.FileHandler(LOCAL_LOCATION, encoding='utf8')
+    handler.setFormatter(anticrlf.LogFormatter('%(asctime)s - %(levelname)s - %(funcName)s - %(message)s'))
+    log = logging.getLogger(__name__)
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
 
 @dataclass(frozen=True)
 class Severity:
@@ -294,20 +319,23 @@ def convert_to_sarif(
     count_placeholder_loc = 0
     count_unresolved_paths = 0
 
-    for item in findings:
-        if not isinstance(item, dict):
+    for finding in findings:
+        # Create an instance of Finding from thefinding
+        this_finding = Finding(finding)
+        logprint(this_finding.print())
+        if not isinstance(finding, dict):
             continue
         count_total += 1
 
-        severity = map_severity(item)
-        cwe_str   = get_text(item, KEYS_CWE)
-        category  = get_text(item, KEYS_CATEGORY)
+        severity = map_severity(finding)
+        cwe_str   = get_text(finding, KEYS_CWE)
+        category  = get_text(finding, KEYS_CATEGORY)
         rule_id, rule_name = determine_rule_id_and_name(cwe_str, category)
 
-        issue_id     = get_text(item, "issue_id")
-        message_text = get_text(item, KEYS_MESSAGE, default=rule_name)
+        issue_id     = get_text(finding, ["issue_id"])
+        message_text = get_text(finding, KEYS_MESSAGE, default=rule_name)
 
-        files        = item.get("files") or {}
+        files        = finding.get("files") or {}
         src          = files.get("source_file") or {}
         file_path    = src.get("file") or src.get("upload_file") or ""
         line         = src.get("line")
@@ -406,6 +434,10 @@ def write_json(path: str, data: Dict[str, Any]) -> None:
 # =============================================================================
 
 def main() -> None:
+
+    setup_logger()
+    logprint('======== beginning Veracode - pipeline_results_to_sarif.py run ========')
+
     args = parse_args()
     data = read_json(args.input)
     repo_root = os.getenv("GITHUB_WORKSPACE", os.getcwd())
@@ -427,6 +459,8 @@ def main() -> None:
         f"rules={len(sarif['runs'][0]['tool']['driver']['rules'])})"
     )
     print(f"Wrote stats: {args.output_stats} -> {stats}")
+
+    logprint('======== ending Veracode - pipeline_results_to_sarif.py run ========')
 
 if __name__ == "__main__":
     main()
